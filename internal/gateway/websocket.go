@@ -90,8 +90,15 @@ func (g *Gateway) websocket(w http.ResponseWriter, r *http.Request, key string) 
 		t = nil
 	}
 	defer finish(true)
+	draining := g.draining
 	for {
 		select {
+		case <-draining:
+			// On shutdown, leave between generations; an active one finishes first.
+			if t == nil {
+				return
+			}
+			draining = nil
 		case f, ok := <-client:
 			if !ok || f.err != nil {
 				return
@@ -163,6 +170,9 @@ func (g *Gateway) websocket(w http.ResponseWriter, r *http.Request, key string) 
 			case "response.failed", "response.incomplete", "response.cancelled", "error":
 				t.Status = 502
 				finish(false)
+			}
+			if t == nil && draining == nil {
+				return
 			}
 		case <-r.Context().Done():
 			return

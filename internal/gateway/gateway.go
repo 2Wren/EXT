@@ -12,6 +12,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,12 +27,14 @@ type Gateway struct {
 	ledger      *billing.Ledger
 	audit       *audit.Archive
 	connections atomic.Int64
+	draining    chan struct{}
+	drainOnce   sync.Once
 }
 
 type turnKey struct{}
 
 func New(upstream *url.URL, ledger *billing.Ledger, archive *audit.Archive) *Gateway {
-	g := &Gateway{upstream: upstream, ledger: ledger, audit: archive}
+	g := &Gateway{upstream: upstream, ledger: ledger, audit: archive, draining: make(chan struct{})}
 	g.proxy = &httputil.ReverseProxy{
 		Rewrite: func(p *httputil.ProxyRequest) {
 			p.SetURL(upstream)
@@ -220,6 +223,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Failure(w, status, code, err.Error())
 		return
 	}
+	// Counted until the turn is handed to the archive, so shutdown waits for it.
+	g.connections.Add(1)
+	defer g.connections.Add(-1)
 	defer func() {
 		t.Duration = time.Since(t.Started).Microseconds()
 		if r.Context().Err() != nil {
@@ -402,7 +408,9 @@ func textOnly(v any) bool {
 	return true
 }
 
+// Drain asks idle WebSocket sessions to end and waits for active generations.
 func (g *Gateway) Drain(ctx context.Context) error {
+	g.drainOnce.Do(func() { close(g.draining) })
 	wait := time.NewTicker(10 * time.Millisecond)
 	defer wait.Stop()
 	for g.connections.Load() > 0 {

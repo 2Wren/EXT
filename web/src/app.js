@@ -17,7 +17,6 @@ const flag=n=>n?'是':'否';
 const keyNames=new Map();
 let active='overview', epoch=0, chartObserver;
 let repaintCharts=[];
-let demoData;
 const element=(tag,value,cls)=>{
  const n=document.createElement(tag);
  if(value!=null)n.textContent=value;
@@ -33,10 +32,6 @@ const action=(label,callback,cls)=>{
 const keyName=id=>keyNames.get(id)||id?.slice(0,10)||'未知';
 function notice(text='',error=false){message.textContent=text;message.className=error?'error strong':'';}
 async function api(path, options={}){
- if(demoData && !['health','session','logout'].includes(path)){
-  if(options.method && options.method!=='GET')throw Error('演示模式只读');
-  return demoData(path);
- }
  const r=await fetch('api/'+path,{
   ...options,
   headers:options.body||(options.method&&options.method!=='GET')?{'Content-Type':'application/json','X-CPA-Ext-Admin':'1'}:undefined
@@ -87,15 +82,12 @@ function form(fields,save){
   else i.value=value??'';
   if(type==='number'){i.step='any';i.min='0';i.required=true;}
   if(type==='password')i.autocomplete='new-password';
-  i.disabled=Boolean(demoData);
   l.append(i);f.append(l);inputs[name]=i;
  }
  const submit=element('button','保存','primary');
- submit.disabled=Boolean(demoData);
  f.append(submit);
  f.addEventListener('submit',async e=>{
   e.preventDefault();
-  if(demoData)return;
   submit.disabled=true;
   const data=Object.fromEntries(Object.entries(inputs).map(([k,i])=>[k,i.type==='checkbox'?i.checked:i.type==='number'?i.valueAsNumber:i.value.trim()]));
   try{await save(data);await load(active);notice('已保存。');}
@@ -159,18 +151,6 @@ function keyForm(row){
  ],data=>api('keys',{method:'PUT',body:JSON.stringify({...data,id:row.id,daily:Math.round(data.daily*1e9),total:Math.round(data.total*1e9)})}));
  if(row.cpa_present===false)f.querySelectorAll('input,button').forEach(n=>n.disabled=true);
  return f;
-}
-function cpaLink(label,route){
- const a=element('a',label,'button-link');
- const target=new URL('/management.html',location.href);target.hash=route;
- if(window.parent===window && target.port==='8481')target.port='8482';
- try{
-  if(window.parent!==window && window.parent.location.origin===location.origin){
-   target.pathname=window.parent.location.pathname;
-   a.addEventListener('click',e=>{e.preventDefault();window.parent.location.hash=route;});
-  }
- }catch{}
- a.href=target.href;return a;
 }
 function timeSeries(series,days){
  const box=element('section',null,'panel');
@@ -361,14 +341,14 @@ const views={
   const rowsTable=table(rows.filter(r=>r.cpa_present!==false),[
    ['Key',keyCell],['日额度',r=>r.daily?usd(r.daily):'无限'],['总额度',r=>r.total?usd(r.total):'无限'],
    ['今日消费',r=>usd(r.spent_today)],['累计消费',r=>usd(r.spent)],
-   ['操作',r=>action(demoData?'查看':'编辑',()=>{
+   ['操作',r=>action('编辑',()=>{
     editor.hidden=false;editor.replaceChildren(element('h2','编辑额度 · '+(r.name||r.masked_key||keyName(r.id))),keyForm(r),action('关闭',()=>{editor.hidden=true;}));
     editor.scrollIntoView({block:'nearest',behavior:'smooth'});
    })]
   ]);
   return [rowsTable,editor];
  },
- events:rows=>[table(rows,[['时间',r=>date(r.happened)],['API Key',r=>keyName(r.key_id)],['模型','model'],['输入',r=>integer(r.input)],['输出',r=>integer(r.output)],['缓存',r=>integer(r.cached)],['费用',r=>usd(r.cost)],['状态',r=>state(r.blocked||(r.cost==null?'待对账':'已结算'),r.blocked?'error':r.cost==null?'pending':'ok')],['Turn',r=>r.turn_id?action('查看',()=>showTurn(r.turn_id)):'—']])],
+ events:rows=>[table(rows,[['时间',r=>date(r.happened)],['API Key',r=>keyName(r.key_id)],['模型','model'],['输入',r=>integer(r.input)],['输出',r=>integer(r.output)],['缓存',r=>integer(r.cached)],['费用',r=>usd(r.cost)],['状态',r=>{const s=state(r.blocked||(r.cost==null?'待计价':r.approx?'已结算 · 估算':'已结算'),r.blocked?'error':r.cost==null?'pending':'ok');if(!r.blocked&&r.cost==null)s.title='价格表中暂无该模型，同步到价格后自动结算';return s;}],['Turn',r=>r.turn_id?action('查看',()=>showTurn(r.turn_id)):'—']])],
  sessions:rows=>[table(rows,[['最后更新',r=>date(r.started)],['API Key',r=>keyName(r.key_id)],['会话','session'],['轮次','turns'],['费用',r=>usd(r.cost)],['操作',r=>action('打开',()=>showSession(r),'row-action')]])],
 
 };
@@ -401,7 +381,7 @@ async function monitor(){
   badge.dataset.status=ok?'ok':'error';
   badge.title=health.error||'';
   badge.replaceChildren(element('span'),document.createTextNode(ok?'采集正常':health.error?'采集异常':'等待采集'));
-   if(active==='keys' && !demoData && !document.querySelector('#key-editor:not([hidden])')){
+   if(active==='keys' && !document.querySelector('#key-editor:not([hidden])')){
     const token=epoch,rows=await api('keys');
     if(token===epoch && active==='keys' && !document.querySelector('#key-editor:not([hidden])')){
      rows.forEach(k=>keyNames.set(k.id,k.name||k.masked_key));content.replaceChildren(...views.keys(rows));
@@ -411,57 +391,7 @@ async function monitor(){
   badge.dataset.status='error';badge.replaceChildren(element('span'),document.createTextNode('采集状态不可用'));
  }
 }
-const demoStorageKey='cpa-ext-data-view';
-
-async function changeDemo(enabled, remember){
- if(enabled){
-  const {createDemo}=await import('./demo.js');
-  demoData=createDemo();
- }else{
-  demoData=undefined;
- }
- if(remember){
-  try{sessionStorage.setItem(demoStorageKey,enabled?'demo':'live');}catch{}
-  const url=new URL(location.href);
-  if(url.searchParams.has('demo')){
-   url.searchParams.delete('demo');
-   history.replaceState(history.state,'',url);
-  }
- }
- keyNames.clear();
- document.querySelector('#demo-note').hidden=!enabled;
- document.querySelector('#demo-toggle').textContent=enabled?'查看真实数据':'显示演示数据';
-}
-
-async function chooseInitialData(){
- const flag=new URL(location.href).searchParams.get('demo');
- if(flag==='1'||flag==='0'){
-  await changeDemo(flag==='1',true);
-  return;
- }
- let saved;
- try{saved=sessionStorage.getItem(demoStorageKey);}catch{}
- if(saved){
-  await changeDemo(saved==='demo',false);
-  return;
- }
- const rows=await Promise.all([api('overview?days=30'),api('keys')]);
- if(rows.every(items=>items.length===0))await changeDemo(true,false);
-}
-
-async function startDashboard(){
- const toggle=document.querySelector('#demo-toggle');
- toggle.addEventListener('click',async ()=>{
-  toggle.disabled=true;
-  try{
-   await changeDemo(!demoData,true);
-   await load(locationPage());
-  }catch(error){notice(error.message,true);}
-  finally{toggle.disabled=false;}
- });
- content.replaceChildren(element('p','正在加载…','muted'));
- try{await chooseInitialData();}catch{}
- toggle.disabled=false;
+function startDashboard(){
  load(locationPage());
  monitor();
  setInterval(monitor,5000);
@@ -543,7 +473,6 @@ if(loginForm){
  document.querySelectorAll('nav button').forEach(b=>b.addEventListener('click',()=>{location.hash=b.dataset.page;}));
  document.querySelector('#refresh').addEventListener('click',()=>{load(active);monitor();});
  document.querySelector('#days').addEventListener('change',()=>load('overview'));
- document.querySelector('#cpa-auth-link')?.replaceWith(cpaLink('CPA 认证文件 ↗','/auth-files'));
  document.querySelector('#logout').addEventListener('click',async ()=>{
   try{await api('logout',{method:'POST',body:'{}'});location.reload();}
   catch(error){notice(error.message,true);}

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -65,20 +66,28 @@ type keyState struct {
 	lease   *lease
 }
 type Ledger struct {
-	db      *sql.DB
-	mu      sync.Mutex
-	keys    map[string]*keyState
-	prices  map[[2]string]Price
-	active  map[int64]*lease
-	healthy bool
-	now     func() time.Time
+	db     *sql.DB
+	mu     sync.Mutex
+	keys   map[string]*keyState
+	prices map[[2]string]Price
+	// Event pricing: manual overrides, synchronized catalog, built-in references.
+	manual    map[string]Price
+	reference map[string]Price
+	catalog   map[string]CatalogPrice
+	rows      map[string]catalogRow
+	sync      CatalogStatus
+	rev       int64
+	active    map[int64]*lease
+	healthy   bool
+	now       func() time.Time
 }
 
 func New(db *sql.DB) (*Ledger, error) {
 	if err := SeedReferences(db); err != nil {
 		return nil, err
 	}
-	l := &Ledger{db: db, keys: map[string]*keyState{}, prices: map[[2]string]Price{}, active: map[int64]*lease{}, now: time.Now}
+	l := &Ledger{db: db, keys: map[string]*keyState{}, prices: map[[2]string]Price{}, active: map[int64]*lease{}, now: time.Now,
+		manual: map[string]Price{}, reference: map[string]Price{}, catalog: map[string]CatalogPrice{}, rows: map[string]catalogRow{}}
 	rows, err := db.Query("SELECT k.id,k.name,k.enabled,k.daily,k.total,coalesce(c.cpa_present,1) FROM keys k LEFT JOIN cpa_keys c ON c.id=k.id")
 	if err != nil {
 		return nil, err
@@ -107,9 +116,27 @@ func New(db *sql.DB) (*Ledger, error) {
 		if err = rows.Scan(&p.ID, &p.Protocol, &p.Model, &p.BilledModel, &p.Input, &p.Output, &p.Cached, &p.CacheWrite, &p.MaxInput, &p.MaxOutput, &p.Verified, &p.Source, &p.SourceURL, &p.SourceDate, &p.IsReference, &p.Note); err != nil {
 			return nil, err
 		}
-		l.prices[[2]string{p.Protocol, p.Model}] = p
+		l.remember(p)
 	}
-	return l, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	return l, l.loadCatalog()
+}
+
+// remember indexes a price for admission and for event pricing.
+func (l *Ledger) remember(p Price) {
+	if p.Protocol == "*" {
+		return
+	}
+	l.prices[[2]string{p.Protocol, p.Model}] = p
+	index := l.manual
+	if p.IsReference {
+		index = l.reference
+	}
+	index[strings.ToLower(p.Model)] = p
+	index[strings.ToLower(p.BilledModel)] = p
 }
 
 func (l *Ledger) SetHealthy(ok bool) { l.mu.Lock(); defer l.mu.Unlock(); l.healthy = ok }
@@ -217,7 +244,8 @@ func (l *Ledger) AddPrice(p Price) error {
 	}
 	p.ID, err = result.LastInsertId()
 	if err == nil {
-		l.prices[[2]string{p.Protocol, p.Model}] = p
+		l.remember(p)
+		l.rev++
 	}
 	return err
 }
@@ -317,30 +345,19 @@ func (l *Ledger) Settle(turn, event, key, day string, grant Grant, amount int64,
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec("UPDATE turns SET settled=1, session=CASE WHEN session=id AND ?!='' THEN ? ELSE session END WHERE id=? AND settled=0", session, session, turn)
-	if err != nil {
+	if err = closeTurn(tx, turn, key, session); err != nil {
 		return err
 	}
-	n, err := result.RowsAffected()
-	if err != nil || n != 1 {
-		return errors.New("turn already settled")
-	}
-	if session != "" && session != turn {
-		if _, err = tx.Exec("UPDATE OR IGNORE conversation_history SET session=? WHERE key_id=? AND session=? AND EXISTS (SELECT 1 FROM turns WHERE id=? AND session=?)", session, key, turn, turn, session); err != nil {
-			return err
-		}
-		if _, err = tx.Exec("UPDATE turns SET session=? WHERE key_id=? AND session=? AND EXISTS (SELECT 1 FROM turns WHERE id=? AND session=?)", session, key, turn, turn, session); err != nil {
-			return err
-		}
-	}
-	if _, err = tx.Exec("UPDATE events SET turn_id=?,cost=? WHERE id=? AND turn_id IS NULL", turn, amount, event); err != nil {
+	if _, err = tx.Exec("UPDATE events SET turn_id=?,cost=?,price_id=? WHERE id=? AND turn_id IS NULL", turn, amount, grant.PriceID, event); err != nil {
 		return err
 	}
-	if _, err = tx.Exec("INSERT INTO spend VALUES(?,?,?,?)", event, key, day, amount); err != nil {
+	if _, err = tx.Exec("INSERT INTO spend(event_id,key_id,day,amount) VALUES(?,?,?,?) ON CONFLICT(event_id) DO UPDATE SET amount=excluded.amount,day=excluded.day", event, key, day, amount); err != nil {
 		return err
 	}
 	var a *lease
 	var reusable bool
+	var result sql.Result
+	var n int64
 	if grant.LeaseID != 0 {
 		a = l.active[grant.LeaseID]
 		k := l.keys[key]
@@ -367,6 +384,47 @@ func (l *Ledger) Settle(turn, event, key, day string, grant Grant, amount int64,
 		}
 	}
 	return nil
+}
+
+// closeTurn marks a turn as matched to its usage event and adopts the session
+// CPA reported when the gateway had to fall back to the turn ID.
+func closeTurn(tx *sql.Tx, turn, key, session string) error {
+	result, err := tx.Exec("UPDATE turns SET settled=1, session=CASE WHEN session=id AND ?!='' THEN ? ELSE session END WHERE id=? AND settled=0", session, session, turn)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil || n != 1 {
+		return errors.New("turn already settled")
+	}
+	if session != "" && session != turn {
+		if _, err = tx.Exec("UPDATE OR IGNORE conversation_history SET session=? WHERE key_id=? AND session=? AND EXISTS (SELECT 1 FROM turns WHERE id=? AND session=?)", session, key, turn, turn, session); err != nil {
+			return err
+		}
+		if _, err = tx.Exec("UPDATE turns SET session=? WHERE key_id=? AND session=? AND EXISTS (SELECT 1 FROM turns WHERE id=? AND session=?)", session, key, turn, turn, session); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Link attaches a usage event to the unreserved turn that produced it. The
+// event is priced separately by Charge, so no balance moves here.
+func (l *Ledger) Link(turn, event, key, session string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	tx, err := l.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = closeTurn(tx, turn, key, session); err != nil {
+		return err
+	}
+	if _, err = tx.Exec("UPDATE events SET turn_id=? WHERE id=? AND turn_id IS NULL", turn, event); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (l *Ledger) Snapshot(key string) (free, inflight int64) {

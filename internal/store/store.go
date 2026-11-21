@@ -26,42 +26,25 @@ func Open(dir string) (*sql.DB, error) {
 		return nil, err
 	}
 	// Additive migration: preserve old price IDs referenced by historical turns.
-	for _, column := range []struct{ name, definition string }{
-		{"source", "TEXT NOT NULL DEFAULT 'manual'"},
-		{"source_url", "TEXT NOT NULL DEFAULT ''"},
-		{"source_date", "TEXT NOT NULL DEFAULT ''"},
-		{"is_reference", "INTEGER NOT NULL DEFAULT 0"},
-		{"note", "TEXT NOT NULL DEFAULT ''"},
+	for _, column := range []struct{ table, name, definition string }{
+		{"prices", "source", "TEXT NOT NULL DEFAULT 'manual'"},
+		{"prices", "source_url", "TEXT NOT NULL DEFAULT ''"},
+		{"prices", "source_date", "TEXT NOT NULL DEFAULT ''"},
+		{"prices", "is_reference", "INTEGER NOT NULL DEFAULT 0"},
+		{"prices", "note", "TEXT NOT NULL DEFAULT ''"},
+		{"prices", "tiers", "TEXT NOT NULL DEFAULT ''"},
+		{"events", "price_id", "INTEGER NOT NULL DEFAULT 0"},
+		{"events", "approx", "INTEGER NOT NULL DEFAULT 0"},
 	} {
-		rows, e := db.Query("PRAGMA table_info(prices)")
-		if e != nil {
+		var exists bool
+		if err = db.QueryRow("SELECT count(*)>0 FROM pragma_table_info(?) WHERE name=?", column.table, column.name).Scan(&exists); err != nil {
 			db.Close()
-			return nil, e
-		}
-		exists := false
-		for rows.Next() {
-			var cid, notnull, pk int
-			var name, kind string
-			var def any
-			if e = rows.Scan(&cid, &name, &kind, &notnull, &def, &pk); e != nil {
-				rows.Close()
-				db.Close()
-				return nil, e
-			}
-			if name == column.name {
-				exists = true
-			}
-		}
-		e = rows.Err()
-		rows.Close()
-		if e != nil {
-			db.Close()
-			return nil, e
+			return nil, err
 		}
 		if !exists {
-			if _, e = db.Exec("ALTER TABLE prices ADD COLUMN " + column.name + " " + column.definition); e != nil {
+			if _, err = db.Exec("ALTER TABLE " + column.table + " ADD COLUMN " + column.name + " " + column.definition); err != nil {
 				db.Close()
-				return nil, e
+				return nil, err
 			}
 		}
 	}

@@ -28,7 +28,11 @@ type Service struct {
 
 func (s Service) Handler(path string) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) { reply(w, 200, s.Collector.Status()) })
+	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
+		status := s.Collector.Status()
+		status["prices"] = s.Ledger.CatalogStatus()
+		reply(w, 200, status)
+	})
 	mux.HandleFunc("GET /api/overview", s.overview)
 	mux.HandleFunc("GET /api/series", s.series)
 	mux.HandleFunc("GET /api/keys", s.keys)
@@ -270,6 +274,6 @@ func (s Service) turn(w http.ResponseWriter, r *http.Request) {
 func (s Service) events(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
 	s.query(w, `SELECT e.id,e.happened,e.key_id,e.trace,e.request_id,e.model,e.billed_model,e.provider,e.input,e.output,e.cached,e.cache_write,e.total,
- e.cost,e.failed,e.turn_id,e.blocked,e.latency,e.ttft FROM events e WHERE e.happened<? AND (?='' OR e.key_id=?)
+ e.cost,e.failed,e.turn_id,e.blocked,e.latency,e.ttft,e.price_id,e.approx FROM events e WHERE e.happened<? AND (?='' OR e.key_id=?)
  ORDER BY e.happened DESC LIMIT 100`, page(r), key, key)
 }

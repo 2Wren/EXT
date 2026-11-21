@@ -41,7 +41,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
 
         chunk({"role":"assistant","content":"alpha "})
-        time.sleep(.05 if data.get("messages",[{}])[-1].get("content")=="bench" else 2)
+        prompt = data.get("messages",[{}])[-1].get("content")
+        time.sleep({"bench": .05, "slow": 8}.get(prompt, 2))
         chunk({"content":"beta"})
         chunk({}, finish="stop")
         chunk(usage={"prompt_tokens":20,"completion_tokens":4,"total_tokens":24})

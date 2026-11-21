@@ -1,0 +1,8 @@
+# Overlay for drain.py: the ledger must survive the restart under test.
+services:
+  ext:
+    tmpfs: !reset []
+    volumes:
+      - drain:/data
+volumes:
+  drain:

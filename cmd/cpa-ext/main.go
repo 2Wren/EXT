@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -100,10 +101,20 @@ func run() error {
 	}
 	collected := make(chan struct{})
 	go func() { defer close(collected); collector.Run(ctx) }()
+	priced := make(chan struct{})
+	go func() {
+		defer close(priced)
+		ledger.RunCatalog(ctx, &http.Client{Timeout: 2 * time.Minute}, env("PRICE_CATALOG_URL", billing.CatalogURL), time.Duration(positive("PRICE_SYNC_MINUTES", 15))*time.Minute)
+	}()
 	front := gateway.New(upstream, ledger, archive)
 	adm := admin.Service{DB: db, Ledger: ledger, Audit: archive, Collector: collector, Password: password, Assets: web.Assets()}
+	// Requests outlive the stop signal: on shutdown the listeners close at once
+	// (the reverse proxy then sends new requests straight to CPA) while streams
+	// already in flight get the grace period to finish.
+	serving, stopServing := context.WithCancel(context.Background())
+	defer stopServing()
 	serve := func(addr string, h http.Handler) *http.Server {
-		return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 32 << 10, BaseContext: func(_ net.Listener) context.Context { return ctx }}
+		return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 32 << 10, BaseContext: func(_ net.Listener) context.Context { return serving }}
 	}
 	servers := []*http.Server{
 		serve(env("GATEWAY_ADDR", "127.0.0.1:8480"), front),
@@ -122,18 +133,40 @@ func run() error {
 	case serveErr = <-serverErrors:
 		cancel()
 	}
-	shutdown, stop := context.WithTimeout(context.Background(), 10*time.Second)
+	grace, stop := context.WithTimeout(context.Background(), time.Duration(positive("SHUTDOWN_GRACE_SECONDS", 120))*time.Second)
 	defer stop()
-	for _, srv := range servers {
-		if err := srv.Shutdown(shutdown); err != nil {
-			return err
+	brief, stopBrief := context.WithTimeout(grace, 5*time.Second)
+	defer stopBrief()
+	var closing sync.WaitGroup
+	for i, srv := range servers {
+		wait := brief // admin surfaces
+		if i == 0 {
+			wait = grace // inference gateway
 		}
+		closing.Go(func() {
+			if err := srv.Shutdown(wait); err != nil {
+				log.Printf("shutdown %s: %v", srv.Addr, err)
+			}
+		})
 	}
-	if err := front.Drain(shutdown); err != nil {
+	if err := front.Drain(grace); err != nil {
+		log.Printf("drain gateway: %v", err)
+	}
+	closing.Wait()
+	// Past the grace period the remaining requests are cancelled; the archive
+	// is closed only once every turn has been handed over.
+	stopServing()
+	for _, srv := range servers {
+		_ = srv.Close()
+	}
+	final, stopFinal := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopFinal()
+	if err := front.Drain(final); err != nil {
 		return err
 	}
 	archive.Close()
 	<-collected
+	<-priced
 	if errors.Is(serveErr, http.ErrServerClosed) {
 		return nil
 	}

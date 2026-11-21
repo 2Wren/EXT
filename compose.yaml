@@ -10,13 +10,17 @@ services:
       - ./state/cpa-auth:/root/.cli-proxy-api
       - ./state/panel:/panel
       - ./state/cpa-plugins:/plugins
+    # Loopback only: the reverse proxy falls back to CPA while cpa-ext restarts.
+    ports:
+      - "127.0.0.1:8317:8317"
   cpa-ext:
     image: cpa-ext:dev
     build:
       context: .
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
-    stop_grace_period: 15s
+    # In-flight streams get SHUTDOWN_GRACE_SECONDS (120) to finish on restart.
+    stop_grace_period: 150s
     user: "${CPA_EXT_UID:-1000}:${CPA_EXT_GID:-1000}"
     read_only: true
     environment:

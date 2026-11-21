@@ -45,3 +45,12 @@ CREATE TABLE IF NOT EXISTS conversation_history (
 CREATE TABLE IF NOT EXISTS cpa_keys (id TEXT PRIMARY KEY REFERENCES keys(id), masked_key TEXT NOT NULL, cpa_present INTEGER NOT NULL);
 
 CREATE TABLE IF NOT EXISTS cpa_keys_sync (id INTEGER PRIMARY KEY CHECK(id=1), last_success TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS price_catalog (
+ model TEXT PRIMARY KEY, provider TEXT NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL,
+ cached INTEGER NOT NULL, cache_write INTEGER NOT NULL, tiers TEXT NOT NULL, context INTEGER NOT NULL, max_output INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS price_sync (id INTEGER PRIMARY KEY CHECK(id=1), etag TEXT NOT NULL, checked TEXT NOT NULL, changed TEXT NOT NULL, error TEXT NOT NULL);
+
+CREATE INDEX IF NOT EXISTS event_unpriced ON events(happened,id) WHERE cost IS NULL AND blocked IS NULL;
