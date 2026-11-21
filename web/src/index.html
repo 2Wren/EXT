@@ -3,18 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>cpa-ext</title>
+  <title>EXT</title>
   <link rel="stylesheet" href="app.css">
 </head>
 <body class="workspace">
   <main>
     <header class="page-header">
       <div class="title-row">
-        <h1>cpa-ext</h1>
-        <nav class="tabs" aria-label="cpa-ext 管理">
+        <h1>EXT</h1>
+        <nav class="tabs" aria-label="EXT 管理">
           <button data-page="overview" type="button">用量总览</button>
-          <button data-page="keys" type="button">Key 额度</button>
-          <button data-page="events" type="button">消费流水</button>
+          <button data-page="keys" type="button">密钥限制</button>
+          <button data-page="events" type="button">请求明细</button>
           <button data-page="sessions" type="button">会话审计</button>
         </nav>
       </div>
@@ -22,9 +22,6 @@
         <p id="description" class="description"></p>
         <div class="page-actions">
           <p id="health" class="health" role="status"><span></span>正在连接</p>
-          <label class="range-picker" for="days"><span class="sr-only">时间范围</span>
-            <select id="days"><option value="7">近 7 天</option><option value="14">近 14 天</option><option value="30" selected>近 30 天</option></select>
-          </label>
           <button id="refresh" type="button">刷新</button>
           <button id="logout" class="quiet" type="button">退出</button>
         </div>

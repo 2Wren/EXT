@@ -3,7 +3,6 @@ package billing
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -13,22 +12,30 @@ const USD int64 = 1_000_000_000
 const maxLimit = 100_000 * USD
 
 var (
-	ErrDisabled    = errors.New("key is disabled or unregistered")
-	ErrExceeded    = errors.New("key quota exhausted")
-	ErrUnavailable = errors.New("verified billing limit unavailable")
-	ErrWarming     = errors.New("quota capacity is being refreshed")
+	ErrDisabled = errors.New("key is not registered in CPA")
+	ErrModel    = errors.New("model is not allowed for this key")
+	ErrWeekly   = errors.New("weekly limit reached; it resets on Monday 00:00 (UTC+8)")
+	ErrTotal    = errors.New("total limit reached")
 )
 
 var Shanghai = time.FixedZone("Asia/Shanghai", 8*60*60)
 
 func Day(now time.Time) string { return now.In(Shanghai).Format("2006-01-02") }
 
+// Week is the day the current week began: Monday, Beijing time.
+func Week(now time.Time) string {
+	now = now.In(Shanghai)
+	return now.AddDate(0, 0, -((int(now.Weekday()) + 6) % 7)).Format("2006-01-02")
+}
+
 type Key struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Enabled bool   `json:"enabled"`
-	Daily   int64  `json:"daily"`
-	Total   int64  `json:"total"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Weekly and Total cap the key's spend in nano-USD; zero means no cap.
+	Weekly int64 `json:"weekly"`
+	Total  int64 `json:"total"`
+	// Models lists the model names this key may call; empty allows every model.
+	Models []string `json:"models"`
 }
 
 type Price struct {
@@ -54,16 +61,9 @@ func (p Price) Bound(output int64) int64 {
 	return p.MaxInput*(p.Input+p.Cached+p.CacheWrite) + output*p.Output
 }
 
-type Grant struct{ PriceID, LeaseID, Amount int64 }
-type lease struct {
-	id, free, inFlight int64
-	day                string
-}
 type keyState struct {
 	Key
 	present bool
-	room    int64
-	lease   *lease
 }
 type Ledger struct {
 	db     *sql.DB
@@ -77,8 +77,6 @@ type Ledger struct {
 	rows      map[string]catalogRow
 	sync      CatalogStatus
 	rev       int64
-	active    map[int64]*lease
-	healthy   bool
 	now       func() time.Time
 }
 
@@ -86,19 +84,21 @@ func New(db *sql.DB) (*Ledger, error) {
 	if err := SeedReferences(db); err != nil {
 		return nil, err
 	}
-	l := &Ledger{db: db, keys: map[string]*keyState{}, prices: map[[2]string]Price{}, active: map[int64]*lease{}, now: time.Now,
+	l := &Ledger{db: db, keys: map[string]*keyState{}, prices: map[[2]string]Price{}, now: time.Now,
 		manual: map[string]Price{}, reference: map[string]Price{}, catalog: map[string]CatalogPrice{}, rows: map[string]catalogRow{}}
-	rows, err := db.Query("SELECT k.id,k.name,k.enabled,k.daily,k.total,coalesce(c.cpa_present,1) FROM keys k LEFT JOIN cpa_keys c ON c.id=k.id")
+	rows, err := db.Query("SELECT k.id,k.name,k.weekly,k.total,k.models,coalesce(c.cpa_present,1) FROM keys k LEFT JOIN cpa_keys c ON c.id=k.id")
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var k Key
 		var present bool
-		if err = rows.Scan(&k.ID, &k.Name, &k.Enabled, &k.Daily, &k.Total, &present); err != nil {
+		var models string
+		if err = rows.Scan(&k.ID, &k.Name, &k.Weekly, &k.Total, &models, &present); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		k.Models = SplitModels(models)
 		l.keys[k.ID] = &keyState{Key: k, present: present}
 	}
 	err = rows.Err()
@@ -139,82 +139,137 @@ func (l *Ledger) remember(p Price) {
 	index[strings.ToLower(p.BilledModel)] = p
 }
 
-func (l *Ledger) SetHealthy(ok bool) { l.mu.Lock(); defer l.mu.Unlock(); l.healthy = ok }
-
+// Enabled reports whether CPA still has the key.
 func (l *Ledger) Enabled(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.keys[key] != nil && l.keys[key].Enabled && l.keys[key].present
+	return l.keys[key] != nil && l.keys[key].present
 }
 
-func (l *Ledger) Admit(key, protocol, model string, output int64, strictShape bool, day string) (Grant, error) {
+// Models returns the key's model restriction; empty means unrestricted.
+func (l *Ledger) Models(key string) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.keys[key] == nil {
+		return nil
+	}
+	return l.keys[key].Models
+}
+
+// SplitModels reads the stored newline-separated restriction.
+func SplitModels(stored string) []string {
+	models := []string{}
+	for _, m := range strings.Split(stored, "\n") {
+		if m != "" {
+			models = append(models, m)
+		}
+	}
+	return models
+}
+
+func cleanModels(in []string) ([]string, error) {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, m := range in {
+		m = strings.TrimSpace(m)
+		if m == "" || seen[strings.ToLower(m)] {
+			continue
+		}
+		if len(m) > 200 || strings.ContainsAny(m, "\r\n") || len(out) == 200 {
+			return nil, errors.New("invalid model restriction")
+		}
+		seen[strings.ToLower(m)] = true
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+// AllowsModel reports whether a model passes a restriction. Names compare
+// without case, "*" matches any run of characters, and a routing prefix
+// ("devin/claude-opus-5", "models/gemini-pro") may be omitted from the entry.
+func AllowsModel(allowed []string, model string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	model = strings.ToLower(strings.TrimSpace(model))
+	bare := model[strings.LastIndex(model, "/")+1:]
+	for _, entry := range allowed {
+		entry = strings.ToLower(entry)
+		if wildcard(entry, model) || wildcard(entry, bare) {
+			return true
+		}
+	}
+	return false
+}
+
+func wildcard(pattern, text string) bool {
+	parts := strings.Split(pattern, "*")
+	if len(parts) == 1 {
+		return pattern == text
+	}
+	if !strings.HasPrefix(text, parts[0]) {
+		return false
+	}
+	text = text[len(parts[0]):]
+	for _, part := range parts[1 : len(parts)-1] {
+		at := strings.Index(text, part)
+		if at < 0 {
+			return false
+		}
+		text = text[at+len(part):]
+	}
+	return strings.HasSuffix(text, parts[len(parts)-1])
+}
+
+// Admit decides whether a key may start a request and returns the manual price
+// row recorded with the turn. Limits count the spend already recorded, so a
+// request in flight when a limit is reached still completes.
+func (l *Ledger) Admit(key, protocol, model string) (int64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	k := l.keys[key]
-	if k == nil || !k.Enabled || !k.present {
-		return Grant{}, ErrDisabled
+	if k == nil || !k.present {
+		return 0, ErrDisabled
 	}
-	p := l.prices[[2]string{protocol, model}]
-	if k.Daily == 0 && k.Total == 0 {
-		return Grant{PriceID: p.ID}, nil
-	}
-	if !l.healthy {
-		return Grant{}, ErrWarming
-	}
-	if !strictShape || !p.Verified || p.ID == 0 || output < 0 || output > p.MaxOutput {
-		return Grant{}, ErrUnavailable
-	}
-	if output == 0 {
-		output = p.MaxOutput
-	}
-	amount := p.Bound(output)
-	if amount <= 0 {
-		return Grant{}, ErrUnavailable
-	}
-	if k.lease == nil || k.lease.day != day {
-		return Grant{}, ErrWarming
-	}
-	if amount > k.lease.free {
-		if amount-k.lease.free > k.room {
-			return Grant{}, ErrExceeded
+	for _, limit := range []struct {
+		amount int64
+		since  string
+		err    error
+	}{{k.Total, "", ErrTotal}, {k.Weekly, Week(l.now()), ErrWeekly}} {
+		if limit.amount == 0 {
+			continue
 		}
-		return Grant{}, ErrWarming
+		var spent int64
+		if err := l.db.QueryRow("SELECT coalesce(sum(amount),0) FROM spend WHERE key_id=? AND day>=?", key, limit.since).Scan(&spent); err != nil {
+			return 0, err
+		}
+		if spent >= limit.amount {
+			return 0, limit.err
+		}
 	}
-	k.lease.free -= amount
-	k.lease.inFlight += amount
-	return Grant{p.ID, k.lease.id, amount}, nil
+	return l.prices[[2]string{protocol, model}].ID, nil
 }
 
+// UpdateKey stores a key's limits and model restriction. The name only applies
+// to a key that is new; names of known keys follow CPAMC through NameKeys.
 func (l *Ledger) UpdateKey(key Key) error {
-	if len(key.ID) != 64 || len(key.Name) > 120 || key.Daily < 0 || key.Total < 0 || key.Daily > maxLimit || key.Total > maxLimit {
+	if len(key.ID) != 64 || len(key.Name) > 120 || key.Weekly < 0 || key.Total < 0 || key.Weekly > maxLimit || key.Total > maxLimit {
 		return errors.New("invalid key policy")
 	}
+	models, err := cleanModels(key.Models)
+	if err != nil {
+		return err
+	}
+	key.Models = models
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	tx, err := l.db.Begin()
-	if err != nil {
+	if _, err = l.db.Exec("INSERT INTO keys(id,name,weekly,total,models) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET weekly=excluded.weekly,total=excluded.total,models=excluded.models",
+		key.ID, key.Name, key.Weekly, key.Total, strings.Join(models, "\n")); err != nil {
 		return err
-	}
-	defer tx.Rollback()
-	_, err = tx.Exec("INSERT INTO keys VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,enabled=excluded.enabled,daily=excluded.daily,total=excluded.total", key.ID, key.Name, key.Enabled, key.Daily, key.Total)
-	if err != nil {
-		return err
-	}
-	old := l.keys[key.ID]
-	if old != nil && old.lease != nil {
-		if _, err = tx.Exec("UPDATE leases SET held=held-? WHERE id=?", old.lease.free, old.lease.id); err != nil {
-			return err
-		}
-	}
-	if err = tx.Commit(); err != nil {
-		return err
-	}
-	if old != nil && old.lease != nil {
-		old.lease.free = 0
 	}
 	present := true
-	if old != nil {
-		present = old.present
+	if old := l.keys[key.ID]; old != nil {
+		present, key.Name = old.present, old.Name
 	}
 	l.keys[key.ID] = &keyState{Key: key, present: present}
 	return nil
@@ -250,142 +305,6 @@ func (l *Ledger) AddPrice(p Price) error {
 	return err
 }
 
-func (l *Ledger) Refresh() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	day := Day(l.now())
-	target := USD
-	for _, p := range l.prices {
-		if p.Verified {
-			target = max(target, p.Bound(p.MaxOutput))
-		}
-	}
-	for _, k := range l.keys {
-		if !k.Enabled || !k.present || (k.Daily == 0 && k.Total == 0) {
-			continue
-		}
-		if k.lease != nil && k.lease.day != day {
-			if err := l.releaseFree(k.lease); err != nil {
-				return err
-			}
-			k.lease = nil
-		}
-		if k.lease != nil && k.lease.free >= target {
-			continue
-		}
-		var total, daily int64
-		err := l.db.QueryRow("SELECT coalesce(sum(amount),0),coalesce(sum(CASE WHEN day=? THEN amount END),0) FROM (SELECT amount,day FROM spend WHERE key_id=? UNION ALL SELECT held,day FROM leases WHERE key_id=?)", day, k.ID, k.ID).Scan(&total, &daily)
-		if err != nil {
-			return err
-		}
-		room := maxLimit
-		if k.Total > 0 {
-			room = min(room, k.Total-total)
-		}
-		if k.Daily > 0 {
-			room = min(room, k.Daily-daily)
-		}
-		k.room = max(0, room)
-		if k.lease == nil {
-			result, err := l.db.Exec("INSERT INTO leases(key_id,day,held) VALUES(?,?,0)", k.ID, day)
-			if err != nil {
-				return err
-			}
-			id, err := result.LastInsertId()
-			if err != nil {
-				return err
-			}
-			k.lease = &lease{id: id, day: day}
-			l.active[id] = k.lease
-		}
-		more := min(k.room, target-k.lease.free)
-		if more <= 0 {
-			continue
-		}
-		if _, err = l.db.Exec("UPDATE leases SET held=held+? WHERE id=?", more, k.lease.id); err != nil {
-			return err
-		}
-		k.lease.free += more
-		k.room -= more
-	}
-	return nil
-}
-
-func (l *Ledger) releaseFree(a *lease) error {
-	if a.free == 0 {
-		return nil
-	}
-	if _, err := l.db.Exec("UPDATE leases SET held=held-? WHERE id=?", a.free, a.id); err != nil {
-		return err
-	}
-	a.free = 0
-	return nil
-}
-
-func (l *Ledger) Close() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for _, p := range l.active {
-		if err := l.releaseFree(p); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Settle moves actual usage into spend and releases the balance of a matched grant.
-func (l *Ledger) Settle(turn, event, key, day string, grant Grant, amount int64, session string) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if amount < 0 || (grant.LeaseID != 0 && amount > grant.Amount) {
-		return fmt.Errorf("amount outside reserved bound")
-	}
-	tx, err := l.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if err = closeTurn(tx, turn, key, session); err != nil {
-		return err
-	}
-	if _, err = tx.Exec("UPDATE events SET turn_id=?,cost=?,price_id=? WHERE id=? AND turn_id IS NULL", turn, amount, grant.PriceID, event); err != nil {
-		return err
-	}
-	if _, err = tx.Exec("INSERT INTO spend(event_id,key_id,day,amount) VALUES(?,?,?,?) ON CONFLICT(event_id) DO UPDATE SET amount=excluded.amount,day=excluded.day", event, key, day, amount); err != nil {
-		return err
-	}
-	var a *lease
-	var reusable bool
-	var result sql.Result
-	var n int64
-	if grant.LeaseID != 0 {
-		a = l.active[grant.LeaseID]
-		k := l.keys[key]
-		reusable = a != nil && k != nil && k.lease == a && k.Enabled && k.present && a.day == Day(l.now())
-		release := grant.Amount
-		if reusable {
-			release = amount
-		}
-		result, err = tx.Exec("UPDATE leases SET held=held-? WHERE id=? AND held>=?", release, grant.LeaseID, release)
-		if err != nil {
-			return err
-		}
-		if n, err = result.RowsAffected(); err != nil || n != 1 {
-			return errors.New("missing lease capacity")
-		}
-	}
-	if err = tx.Commit(); err != nil {
-		return err
-	}
-	if a != nil {
-		a.inFlight -= grant.Amount
-		if reusable {
-			a.free += grant.Amount - amount
-		}
-	}
-	return nil
-}
-
 // closeTurn marks a turn as matched to its usage event and adopts the session
 // CPA reported when the gateway had to fall back to the turn ID.
 func closeTurn(tx *sql.Tx, turn, key, session string) error {
@@ -408,7 +327,7 @@ func closeTurn(tx *sql.Tx, turn, key, session string) error {
 	return nil
 }
 
-// Link attaches a usage event to the unreserved turn that produced it. The
+// Link attaches a usage event to the turn that produced it. The
 // event is priced separately by Charge, so no balance moves here.
 func (l *Ledger) Link(turn, event, key, session string) error {
 	l.mu.Lock()
@@ -425,13 +344,4 @@ func (l *Ledger) Link(turn, event, key, session string) error {
 		return err
 	}
 	return tx.Commit()
-}
-
-func (l *Ledger) Snapshot(key string) (free, inflight int64) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if k := l.keys[key]; k != nil && k.lease != nil {
-		return k.lease.free, k.lease.inFlight
-	}
-	return 0, 0
 }

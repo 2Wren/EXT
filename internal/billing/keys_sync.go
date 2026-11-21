@@ -19,11 +19,39 @@ func (l *Ledger) InitializeKeySync() error {
 	if errors.Is(err, sql.ErrNoRows) {
 		for _, k := range l.keys {
 			k.present = false
-			k.room = 0
 		}
 		return nil
 	}
 	return err
+}
+
+// NameKeys renames synchronized keys without touching their policy and returns
+// the names that were applied.
+func (l *Ledger) NameKeys(names map[string]string) (map[string]string, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	applied := map[string]string{}
+	tx, err := l.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	for id, name := range names {
+		if l.keys[id] == nil {
+			continue
+		}
+		if _, err = tx.Exec("UPDATE keys SET name=? WHERE id=?", name, id); err != nil {
+			return nil, err
+		}
+		applied[id] = name
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	for id, name := range applied {
+		l.keys[id].Name = name
+	}
+	return applied, nil
 }
 
 // SyncKeys applies a successful complete snapshot without deleting policy/history.
@@ -49,18 +77,11 @@ func (l *Ledger) SyncKeys(snapshot []SyncedKey) error {
 		return err
 	}
 	for id, k := range present {
-		if _, err = tx.Exec("INSERT INTO keys(id,name,enabled,daily,total) VALUES(?,?,1,0,0) ON CONFLICT(id) DO NOTHING", id, k.MaskedKey); err != nil {
+		if _, err = tx.Exec("INSERT INTO keys(id,name,weekly,total) VALUES(?,?,0,0) ON CONFLICT(id) DO NOTHING", id, k.MaskedKey); err != nil {
 			return err
 		}
 		if _, err = tx.Exec("INSERT INTO cpa_keys(id,masked_key,cpa_present) VALUES(?,?,1) ON CONFLICT(id) DO UPDATE SET masked_key=excluded.masked_key,cpa_present=1", id, k.MaskedKey); err != nil {
 			return err
-		}
-	}
-	for id, k := range l.keys {
-		if _, ok := present[id]; !ok && k.lease != nil && k.lease.free > 0 {
-			if _, err = tx.Exec("UPDATE leases SET held=held-? WHERE id=?", k.lease.free, k.lease.id); err != nil {
-				return err
-			}
 		}
 	}
 	if _, err = tx.Exec("INSERT INTO cpa_keys_sync(id,last_success) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last_success=excluded.last_success", l.now().UTC().Format(time.RFC3339Nano)); err != nil {
@@ -71,16 +92,10 @@ func (l *Ledger) SyncKeys(snapshot []SyncedKey) error {
 	}
 	for id, k := range l.keys {
 		_, k.present = present[id]
-		if !k.present {
-			k.room = 0
-			if k.lease != nil {
-				k.lease.free = 0
-			}
-		}
 	}
 	for id, k := range present {
 		if l.keys[id] == nil {
-			l.keys[id] = &keyState{Key: Key{ID: id, Name: k.MaskedKey, Enabled: true}, present: true}
+			l.keys[id] = &keyState{Key: Key{ID: id, Name: k.MaskedKey}, present: true}
 		}
 	}
 	return nil

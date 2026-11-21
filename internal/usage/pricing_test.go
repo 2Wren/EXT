@@ -69,7 +69,7 @@ func TestEventsArePricedFromSynchronizedCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := cpa.KeyID("sk-test")
-	if err = ledger.UpdateKey(billing.Key{ID: key, Name: "test", Enabled: true}); err != nil {
+	if err = ledger.UpdateKey(billing.Key{ID: key, Name: "test"}); err != nil {
 		t.Fatal(err)
 	}
 	c := New(db, cpa.Client{Base: cpaServer.URL, HTTP: cpaServer.Client()}, ledger)
@@ -95,9 +95,9 @@ func TestEventsArePricedFromSynchronizedCatalog(t *testing.T) {
 		return a.(int64), price, turn, true
 	}
 
-	// The gateway recorded this turn without a price, as it does for unlimited keys.
-	if _, err = db.Exec(`INSERT INTO turns(id,key_id,day,started,protocol,model,session,parent_response,response_id,trace,price_id,lease_id,reserved,status,audit_state,latency,ttfb)
- VALUES('turn-1',?,?,?,'messages','claude-x','turn-1','','','20261121-node-req-1',0,0,0,200,'complete',1,1)`, key, billing.Day(time.Now()), time.Now().UnixMilli()); err != nil {
+	// The gateway recorded this turn without a manual price.
+	if _, err = db.Exec(`INSERT INTO turns(id,key_id,day,started,protocol,model,session,parent_response,response_id,trace,price_id,status,audit_state,latency,ttfb)
+ VALUES('turn-1',?,?,?,'messages','claude-x','turn-1','','','20261121-node-req-1',0,200,'complete',1,1)`, key, billing.Day(time.Now()), time.Now().UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
 	queue = []string{usageEvent("req-1", "claude-x", "claude-x-high", 2, 100, 10, 5)}

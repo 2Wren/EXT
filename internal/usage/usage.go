@@ -47,7 +47,6 @@ func (c *Collector) Run(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		err := c.step(ctx)
-		c.ledger.SetHealthy(err == nil)
 		c.mu.Lock()
 		if err != nil {
 			if c.issue != err.Error() {
@@ -86,14 +85,14 @@ func (c *Collector) step(ctx context.Context) error {
 		return err
 	}
 	// Pending events are retried when usage arrives, when the price table
-	// changes, and periodically for keys that wait on their reserved turn.
+	// changes, and every half minute.
 	if rev, now := c.ledger.PriceRev(), time.Now(); arrived || rev != c.pricedRev || now.Sub(c.pricedAt) > 30*time.Second {
-		if err := c.price(now); err != nil {
+		if err := c.price(); err != nil {
 			return err
 		}
 		c.pricedRev, c.pricedAt = rev, now
 	}
-	return c.ledger.Refresh()
+	return nil
 }
 
 func (c *Collector) persist(raw []json.RawMessage) error {
@@ -128,14 +127,11 @@ func (c *Collector) persist(raw []json.RawMessage) error {
 	return nil
 }
 
-type candidate struct {
-	turn, key, day, trace, model string
-	grant                        billing.Grant
-}
+type candidate struct{ turn, key, trace string }
 
 func (c *Collector) match() error {
 	// CPA keeps usage for at most an hour, so older turns can no longer match.
-	rows, err := c.db.Query(`SELECT t.id,t.key_id,t.day,t.trace,t.model,t.price_id,t.lease_id,t.reserved FROM turns t
+	rows, err := c.db.Query(`SELECT t.id,t.key_id,t.trace FROM turns t
  WHERE t.settled=0 AND t.trace!='' AND t.started>? AND EXISTS (
  SELECT 1 FROM events e WHERE e.key_id=t.key_id AND (e.trace=t.trace OR (e.request_id!='' AND substr(t.trace,-length(e.request_id)-1)='-'||e.request_id))
  AND e.turn_id IS NULL AND e.blocked IS NULL) ORDER BY t.started LIMIT 100`, time.Now().Add(-6*time.Hour).UnixMilli())
@@ -145,7 +141,7 @@ func (c *Collector) match() error {
 	var batch []candidate
 	for rows.Next() {
 		var x candidate
-		if err = rows.Scan(&x.turn, &x.key, &x.day, &x.trace, &x.model, &x.grant.PriceID, &x.grant.LeaseID, &x.grant.Amount); err != nil {
+		if err = rows.Scan(&x.turn, &x.key, &x.trace); err != nil {
 			rows.Close()
 			return err
 		}
@@ -157,14 +153,8 @@ func (c *Collector) match() error {
 		return err
 	}
 	for _, x := range batch {
-		// Reserved turns settle against their lease at the admitted price;
-		// every other turn is only linked and priced from the price table.
-		if x.grant.LeaseID != 0 {
-			err = c.settle(x)
-		} else {
-			err = c.link(x)
-		}
-		if err != nil {
+		// A turn is only linked to its usage; price prices the event.
+		if err = c.link(x); err != nil {
 			return err
 		}
 	}
@@ -195,7 +185,7 @@ func (c *Collector) link(x candidate) error {
 }
 
 // price charges every pending event the current price table can price.
-func (c *Collector) price(now time.Time) error {
+func (c *Collector) price() error {
 	type pending struct {
 		billing.Usage
 		trace, request string
@@ -225,22 +215,6 @@ func (c *Collector) price(now time.Time) error {
 		}
 		for _, e := range batch {
 			afterTime, afterID = e.happened, e.Event
-			if c.ledger.Limited(e.Key) {
-				// A quota key normally settles through its reserved turn, which
-				// is stored shortly after the response ends. Only usage that
-				// has no such turn (it bypassed the gateway) is priced here.
-				if now.UnixMilli()-e.happened < 120_000 {
-					continue
-				}
-				var reserved bool
-				if err = c.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM turns t WHERE t.key_id=? AND t.lease_id>0 AND t.settled=0 AND t.trace!=''
- AND (t.trace=? OR (?!='' AND substr(t.trace,-length(?)-1)='-'||?)))`, e.Key, e.trace, e.request, e.request, e.request).Scan(&reserved); err != nil {
-					return err
-				}
-				if reserved {
-					continue
-				}
-			}
 			e.Day = billing.Day(time.UnixMilli(e.happened))
 			if _, err = c.ledger.Charge(e.Usage); err != nil {
 				return fmt.Errorf("price %s: %w", e.Event, err)
@@ -250,47 +224,6 @@ func (c *Collector) price(now time.Time) error {
 			return nil
 		}
 	}
-}
-
-func (c *Collector) settle(x candidate) error {
-	reqID := requestID(x.trace)
-	var id, model, session string
-	var input, output, cached, write int64
-	var count int
-	var approx bool
-	var blocked sql.NullString
-	err := c.db.QueryRow(`SELECT count(*),coalesce(min(id),''),coalesce(min(billed_model),''),coalesce(min(session),''),coalesce(sum(input),0),coalesce(sum(output),0),coalesce(sum(cached),0),coalesce(sum(cache_write),0),max(blocked),coalesce(max(approx),0)
- FROM events WHERE key_id=? AND (trace=? OR (request_id!='' AND request_id=?))`, x.key, x.trace, reqID).Scan(&count, &id, &model, &session, &input, &output, &cached, &write, &blocked, &approx)
-	if err != nil {
-		return err
-	}
-	if count != 1 || blocked.Valid {
-		_, err = c.db.Exec("UPDATE events SET blocked=coalesce(blocked,'ambiguous CPA execution') WHERE key_id=? AND (trace=? OR request_id=?)", x.key, x.trace, reqID)
-		return err
-	}
-	if approx {
-		// A reserved bound only covers plain token usage.
-		_, err = c.db.Exec("UPDATE events SET blocked='usage includes a billing dimension outside the configured price' WHERE id=?", id)
-		return err
-	}
-	var p billing.Price
-	err = c.db.QueryRow("SELECT billed_model,input,output,cached,cache_write,max_input,max_output FROM prices WHERE id=?", x.grant.PriceID).Scan(&p.BilledModel, &p.Input, &p.Output, &p.Cached, &p.CacheWrite, &p.MaxInput, &p.MaxOutput)
-	if err != nil {
-		return err
-	}
-	if model != p.BilledModel || input < 0 || output < 0 || cached < 0 || write < 0 || (p.MaxInput > 0 && input+cached+write > p.MaxInput) || (p.MaxOutput > 0 && output > p.MaxOutput) {
-		_, err = c.db.Exec("UPDATE events SET blocked='billed model or token count outside configured price' WHERE id=?", id)
-		return err
-	}
-	amount := input*p.Input + output*p.Output + cached*p.Cached + write*p.CacheWrite
-	if x.grant.LeaseID != 0 && amount > x.grant.Amount {
-		_, err = c.db.Exec("UPDATE events SET blocked='actual charge exceeded the reserved bound' WHERE id=?", id)
-		return err
-	}
-	if err = c.ledger.Settle(x.turn, id, x.key, x.day, x.grant, amount, session); err != nil {
-		return fmt.Errorf("settle %s: %w", x.turn, err)
-	}
-	return nil
 }
 
 type Credential struct {

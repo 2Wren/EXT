@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -19,7 +18,6 @@ func main() {
 		panic(err)
 	}
 	defer ws.Close()
-	strict := os.Getenv("EXPECT_STRICT_BLOCK") == "1"
 	for turn := 1; turn <= 2; turn++ {
 		req := map[string]any{
 			"type":  "response.create",
@@ -42,17 +40,9 @@ func main() {
 				panic(err)
 			}
 			if m["type"] == "error" {
-				details, _ := m["error"].(map[string]any)
-				if strict && details["code"] == "quota_bound_unavailable" {
-					fmt.Println("WebSocket generation with strict key was refused before forwarding")
-					return
-				}
 				panic(string(raw))
 			}
 			if m["type"] == "response.completed" {
-				if strict {
-					panic("strict WebSocket request unexpectedly reached upstream")
-				}
 				fmt.Printf("WebSocket turn %d completed\n", turn)
 				break
 			}

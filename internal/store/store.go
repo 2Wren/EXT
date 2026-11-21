@@ -25,6 +25,10 @@ func Open(dir string) (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
+	has := func(table, column string) (exists bool, err error) {
+		err = db.QueryRow("SELECT count(*)>0 FROM pragma_table_info(?) WHERE name=?", table, column).Scan(&exists)
+		return
+	}
 	// Additive migration: preserve old price IDs referenced by historical turns.
 	for _, column := range []struct{ table, name, definition string }{
 		{"prices", "source", "TEXT NOT NULL DEFAULT 'manual'"},
@@ -35,18 +39,33 @@ func Open(dir string) (*sql.DB, error) {
 		{"prices", "tiers", "TEXT NOT NULL DEFAULT ''"},
 		{"events", "price_id", "INTEGER NOT NULL DEFAULT 0"},
 		{"events", "approx", "INTEGER NOT NULL DEFAULT 0"},
+		{"keys", "models", "TEXT NOT NULL DEFAULT ''"},
+		{"keys", "weekly", "INTEGER NOT NULL DEFAULT 0"},
 	} {
-		var exists bool
-		if err = db.QueryRow("SELECT count(*)>0 FROM pragma_table_info(?) WHERE name=?", column.table, column.name).Scan(&exists); err != nil {
+		exists, err := has(column.table, column.name)
+		if err == nil && !exists {
+			_, err = db.Exec("ALTER TABLE " + column.table + " ADD COLUMN " + column.name + " " + column.definition)
+		}
+		if err != nil {
 			db.Close()
 			return nil, err
 		}
-		if !exists {
-			if _, err = db.Exec("ALTER TABLE " + column.table + " ADD COLUMN " + column.name + " " + column.definition); err != nil {
-				db.Close()
-				return nil, err
-			}
+	}
+	// Limits are checked against recorded spend: the reservations of the
+	// earlier design, its daily limit and the per-key switch are removed.
+	for _, column := range [][2]string{{"keys", "enabled"}, {"keys", "daily"}, {"turns", "lease_id"}, {"turns", "reserved"}} {
+		exists, err := has(column[0], column[1])
+		if err == nil && exists {
+			_, err = db.Exec("ALTER TABLE " + column[0] + " DROP COLUMN " + column[1])
 		}
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if _, err = db.Exec("DROP TABLE IF EXISTS leases"); err != nil {
+		db.Close()
+		return nil, err
 	}
 	return db, nil
 }

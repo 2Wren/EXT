@@ -7,6 +7,12 @@ import (
 	"testing"
 )
 
+func TestNameIDMatchesCPAMC(t *testing.T) {
+	if got := NameID("https://cpa.example", "sk-contract-test-secret"); got != "d215d5f037ee8efda6808a68ecb569faa7cdd3fe5852386bdddc09b833530327" {
+		t.Fatal(got)
+	}
+}
+
 func TestKeysV8Contract(t *testing.T) {
 	for _, tc := range []struct {
 		body string

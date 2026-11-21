@@ -14,7 +14,7 @@ def admin(path, data=None, method="GET"):
     headers={"Authorization":"Basic "+BASIC,"X-CPA-Ext-Admin":"1","Content-Type":"application/json"}
     return json.load(urlopen(Request(ADMIN+path,None if data is None else json.dumps(data).encode(),headers,method=method),timeout=5))
 
-admin("keys",{"id":hashlib.sha256(KEY.encode()).hexdigest(),"name":"Fixture","daily":1_000_000_000,"total":1_000_000_000,"enabled":True},"PUT")
+admin("keys",{"id":hashlib.sha256(KEY.encode()).hexdigest(),"weekly":1_000_000_000,"total":1_000_000_000},"PUT")
 calls=[
     ("responses","/v1/responses",{"model":"fixture-chat","input":"bench","max_output_tokens":20,"stream":True}),
     ("messages","/v1/messages",{"model":"fixture-chat","messages":[{"role":"user","content":"bench"}],"max_tokens":20,"stream":True}),
@@ -40,7 +40,7 @@ for protocol,path,data in calls:
             if row["turn"]["cost"] is not None:
                 break
         else:
-            raise AssertionError((protocol,row,admin("events")[:4]))
+            raise AssertionError((protocol,row,admin("events")["rows"][:4]))
         assert row["turn"]["cost"]==28000,(protocol,row["turn"])
         assert row["body"]["output"]["text"]=="alpha beta",(protocol,row["body"]["output"])
     print(protocol+": key passthrough, streaming and non-streaming capture and billing passed")

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -96,16 +97,23 @@ func Failure(w http.ResponseWriter, status int, code, message string) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": message, "type": code, "code": code}})
 }
 
+var (
+	errBody = errors.New("request body must be a JSON object")
+	errBusy = errors.New("request archive is at capacity, retry shortly")
+)
+
 func quotaError(err error) (int, string) {
 	switch {
 	case errors.Is(err, billing.ErrDisabled):
-		return 403, "key_disabled"
-	case errors.Is(err, billing.ErrExceeded):
-		return 429, "quota_exhausted"
-	case errors.Is(err, billing.ErrUnavailable):
-		return 422, "quota_bound_unavailable"
+		return 403, "key_not_registered"
+	case errors.Is(err, billing.ErrModel):
+		return 403, "model_not_allowed"
+	case errors.Is(err, billing.ErrWeekly), errors.Is(err, billing.ErrTotal):
+		return 429, "limit_reached"
+	case errors.Is(err, errBody):
+		return 400, "invalid_request_body"
 	default:
-		return 503, "quota_temporarily_unavailable"
+		return 503, "temporarily_unavailable"
 	}
 }
 
@@ -191,10 +199,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !g.ledger.Enabled(key) {
-		Failure(w, 403, "key_disabled", "key is disabled or unregistered")
+		Failure(w, 403, "key_not_registered", billing.ErrDisabled.Error())
 		return
 	}
 	if protocol == "read" {
+		if allowed := g.ledger.Models(key); len(allowed) > 0 && r.Method == "GET" {
+			g.listModels(w, r, allowed)
+			return
+		}
 		g.proxy.ServeHTTP(w, r)
 		return
 	}
@@ -243,41 +255,24 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) start(r *http.Request, key, protocol, pathModel string, started time.Time, body []byte) (*audit.Turn, error) {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(body, &fields) != nil || fields == nil {
-		return nil, billing.ErrUnavailable
+		return nil, errBody
 	}
 	model := field(fields, "model")
 	if pathModel != "" {
 		model = pathModel
 	}
-	var output int64
-	capField := map[string]string{"chat": "max_tokens", "responses": "max_output_tokens", "messages": "max_tokens", "responses-ws": "max_output_tokens"}[protocol]
-	if protocol == "chat" && fields["max_completion_tokens"] != nil {
-		capField = "max_completion_tokens"
+	if !billing.AllowsModel(g.ledger.Models(key), model) {
+		return nil, billing.ErrModel
 	}
-	strict := true
-	if protocol == "gemini" {
-		var config map[string]json.RawMessage
-		if len(fields["generationConfig"]) > 0 && json.Unmarshal(fields["generationConfig"], &config) != nil {
-			strict = false
-		}
-		if v := config["maxOutputTokens"]; len(v) > 0 && (json.Unmarshal(v, &output) != nil || output <= 0) {
-			strict = false
-		}
-	} else if v := fields[capField]; len(v) > 0 && (json.Unmarshal(v, &output) != nil || output <= 0) {
-		strict = false
-	}
-	if !g.audit.Acquire() {
-		return nil, billing.ErrWarming
-	}
-	// The certified envelope is deliberately narrow for each protocol.
-	strict = strict && protocol != "responses-ws" && safeEnvelope(protocol, fields)
-	grant, err := g.ledger.Admit(key, protocol, model, output, strict, billing.Day(started))
+	price, err := g.ledger.Admit(key, protocol, model)
 	if err != nil {
-		g.audit.Release()
 		return nil, err
 	}
+	if !g.audit.Acquire() {
+		return nil, errBusy
+	}
 	var random [16]byte
-	if _, err = rand.Read(random[:]); err != nil {
+	if _, err := rand.Read(random[:]); err != nil {
 		panic(err)
 	}
 	session := ""
@@ -304,7 +299,59 @@ func (g *Gateway) start(r *http.Request, key, protocol, pathModel string, starte
 			}
 		}
 	}
-	return &audit.Turn{ID: hex.EncodeToString(random[:]), KeyID: key, Protocol: protocol, Model: model, Parent: field(fields, "previous_response_id"), Session: session, Started: started, Request: body, Grant: grant}, nil
+	return &audit.Turn{ID: hex.EncodeToString(random[:]), KeyID: key, Protocol: protocol, Model: model, Parent: field(fields, "previous_response_id"), Session: session, Started: started, Request: body, PriceID: price}, nil
+}
+
+// listModels serves CPA's model list reduced to what a restricted key may call.
+func (g *Gateway) listModels(w http.ResponseWriter, r *http.Request, allowed []string) {
+	list := &buffered{header: http.Header{}}
+	g.proxy.ServeHTTP(list, r)
+	body := list.body.Bytes()
+	var doc map[string]json.RawMessage
+	if list.status == 200 && json.Unmarshal(body, &doc) == nil {
+		for _, name := range []string{"data", "models"} {
+			var items []map[string]json.RawMessage
+			if doc[name] == nil || json.Unmarshal(doc[name], &items) != nil {
+				continue
+			}
+			kept := []map[string]json.RawMessage{}
+			for _, item := range items {
+				id := field(item, "id")
+				if id == "" {
+					id = field(item, "name")
+				}
+				if billing.AllowsModel(allowed, id) {
+					kept = append(kept, item)
+				}
+			}
+			doc[name], _ = json.Marshal(kept)
+		}
+		body, _ = json.Marshal(doc)
+	}
+	for name, values := range list.header {
+		w.Header()[name] = values
+	}
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(list.status)
+	_, _ = w.Write(body)
+}
+
+type buffered struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (b *buffered) Header() http.Header { return b.header }
+func (b *buffered) Flush()              {}
+func (b *buffered) WriteHeader(status int) {
+	if b.status == 0 {
+		b.status = status
+	}
+}
+func (b *buffered) Write(data []byte) (int, error) {
+	b.WriteHeader(200)
+	return b.body.Write(data)
 }
 
 func field(m map[string]json.RawMessage, name string) string {
@@ -314,98 +361,6 @@ func field(m map[string]json.RawMessage, name string) string {
 		return ""
 	}
 	return v
-}
-
-func safeEnvelope(protocol string, fields map[string]json.RawMessage) bool {
-	allowed := map[string]bool{"model": true, "stream": true, "temperature": true, "top_p": true}
-	specific := map[string][]string{
-		"chat":      {"messages", "max_tokens", "max_completion_tokens", "n", "stream_options", "stop", "tools", "tool_choice", "parallel_tool_calls", "user", "seed"},
-		"responses": {"input", "instructions", "max_output_tokens", "previous_response_id", "tools", "tool_choice", "parallel_tool_calls", "store", "prompt_cache_key", "reasoning"},
-		"messages":  {"messages", "system", "max_tokens", "stop_sequences", "tools", "tool_choice", "metadata", "top_k"},
-		"gemini":    {"contents", "systemInstruction", "generationConfig", "tools", "toolConfig"},
-	}
-	for _, k := range specific[protocol] {
-		allowed[k] = true
-	}
-	for k := range fields {
-		if !allowed[k] {
-			return false
-		}
-	}
-	var n int
-	if v := fields["n"]; v != nil && (json.Unmarshal(v, &n) != nil || n != 1) {
-		return false
-	}
-	if fields["max_tokens"] != nil && fields["max_completion_tokens"] != nil {
-		return false
-	}
-	var config map[string]json.RawMessage
-	if fields["generationConfig"] != nil {
-		if json.Unmarshal(fields["generationConfig"], &config) != nil {
-			return false
-		}
-		for k := range config {
-			switch k {
-			case "maxOutputTokens", "temperature", "topP", "topK", "stopSequences":
-			default:
-				return false
-			}
-		}
-	}
-	var tools []map[string]json.RawMessage
-	if v := fields["tools"]; v != nil && json.Unmarshal(v, &tools) != nil {
-		return false
-	}
-	for _, tool := range tools {
-		switch protocol {
-		case "chat", "responses":
-			if field(tool, "type") != "function" {
-				return false
-			}
-		case "messages":
-			if field(tool, "name") == "" || tool["input_schema"] == nil || field(tool, "type") != "" {
-				return false
-			}
-		case "gemini":
-			if tool["functionDeclarations"] == nil || len(tool) != 1 {
-				return false
-			}
-		}
-	}
-	for _, key := range []string{"messages", "input", "contents", "system", "systemInstruction"} {
-		var v any
-		if json.Unmarshal(fields[key], &v) == nil && !textOnly(v) {
-			return false
-		}
-	}
-	return true
-}
-
-func textOnly(v any) bool {
-	switch x := v.(type) {
-	case []any:
-		for _, part := range x {
-			if !textOnly(part) {
-				return false
-			}
-		}
-	case map[string]any:
-		for k, part := range x {
-			switch k {
-			case "image_url", "image", "audio", "input_audio", "file", "inlineData", "inline_data", "fileData", "file_data", "document", "video":
-				return false
-			}
-			if k == "type" {
-				if s, ok := part.(string); ok && strings.Contains(s, "image") {
-					return false
-				}
-			}
-			if !textOnly(part) {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 // Drain asks idle WebSocket sessions to end and waits for active generations.

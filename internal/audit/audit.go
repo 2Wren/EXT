@@ -29,7 +29,7 @@ type Turn struct {
 	Started                                            time.Time
 	Duration, TTFB                                     int64
 	Status                                             int
-	Grant                                              billing.Grant
+	PriceID                                            int64
 	Request, Response                                  []byte
 	Truncated, Interrupted                             bool
 }
@@ -140,8 +140,8 @@ func (a *Archive) save(t *Turn) error {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.Exec(`INSERT INTO turns(id,key_id,day,started,protocol,model,session,parent_response,response_id,trace,price_id,lease_id,reserved,status,audit_state,latency,ttfb)
- VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, t.ID, t.KeyID, billing.Day(t.Started), t.Started.UnixMilli(), t.Protocol, t.Model, t.Session, t.Parent, response.ID, t.Trace, t.Grant.PriceID, t.Grant.LeaseID, t.Grant.Amount, t.Status, state, t.Duration, t.TTFB)
+	_, err = tx.Exec(`INSERT INTO turns(id,key_id,day,started,protocol,model,session,parent_response,response_id,trace,price_id,status,audit_state,latency,ttfb)
+ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, t.ID, t.KeyID, billing.Day(t.Started), t.Started.UnixMilli(), t.Protocol, t.Model, t.Session, t.Parent, response.ID, t.Trace, t.PriceID, t.Status, state, t.Duration, t.TTFB)
 	if err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ import (
 	"cpa-ext/internal/billing"
 	"cpa-ext/internal/cpa"
 	"log"
+	"strings"
 	"time"
 )
 
@@ -52,6 +53,25 @@ func (c *Collector) SyncKeys(ctx context.Context) error {
 	c.keysStatus.LastSuccess = time.Now().UTC()
 	c.keysStatus.Count = len(keys)
 	return nil
+}
+
+// NameKeys adopts the display names CPAMC keeps in the browser. The browser
+// only knows CPAMC's name identifiers, so they are matched here against the
+// transient raw keys. It returns the ledger key IDs that received a name.
+func (c *Collector) NameKeys(ctx context.Context, base string, names map[string]string) (map[string]string, error) {
+	poll, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	keys, err := c.cpa.Keys(poll)
+	if err != nil {
+		return nil, err
+	}
+	named := map[string]string{}
+	for _, key := range keys {
+		if name := strings.TrimSpace(names[cpa.NameID(base, key)]); name != "" && len(name) <= 120 {
+			named[cpa.KeyID(key)] = name
+		}
+	}
+	return c.ledger.NameKeys(named)
 }
 func (c *Collector) runKeys(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)

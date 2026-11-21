@@ -18,7 +18,7 @@ func TestExactHistoryAndRetention(t *testing.T) {
 	}
 	defer db.Close()
 	key := "fixture"
-	if _, err = db.Exec("INSERT INTO keys VALUES(?,?,1,0,0)", key, key); err != nil {
+	if _, err = db.Exec("INSERT INTO keys(id,name) VALUES(?,?)", key, key); err != nil {
 		t.Fatal(err)
 	}
 	archive, err := New(db, root, 24*time.Hour, 1<<30, 0)

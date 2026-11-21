@@ -197,14 +197,6 @@ func (l *Ledger) Charge(u Usage) (bool, error) {
 	return true, tx.Commit()
 }
 
-// Limited reports whether a key has a quota and therefore reserves before forwarding.
-func (l *Ledger) Limited(key string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	k := l.keys[key]
-	return k != nil && (k.Daily > 0 || k.Total > 0)
-}
-
 // PriceRev changes whenever the price table does, so pending events are retried.
 func (l *Ledger) PriceRev() int64 {
 	l.mu.Lock()

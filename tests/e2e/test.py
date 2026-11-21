@@ -4,6 +4,7 @@ import concurrent.futures
 import json
 import time
 from urllib.error import HTTPError
+import urllib.parse
 from urllib.request import urlopen, Request
 
 ADMIN = "http://127.0.0.1:8581"
@@ -31,8 +32,7 @@ admin("keys/sync",{},"POST")
 assert KEY not in json.dumps(admin("keys")), "client secret leaked"
 assert next(x for x in admin("keys") if x["id"]==hashlib.sha256(KEY.encode()).hexdigest())["cpa_present"]
 admin("prices",{"protocol":"chat","model":"fixture-chat","billed_model":"fixture-chat","input":1000,"output":2000,"cached":500,"cache_write":1000,"max_input":1000,"max_output":20,"verified":True},"POST")
-key = admin("keys",{"id":hashlib.sha256(KEY.encode()).hexdigest(),"name":"Fixture","daily":3_000_000,"total":3_000_000,"enabled":True},"PUT")
-wait(lambda: next(x for x in admin("keys") if x["id"]==key["id"])["admission_capacity"]==3_000_000,"lease not ready")
+key = admin("keys",{"id":hashlib.sha256(KEY.encode()).hexdigest(),"weekly":0,"total":0},"PUT")
 
 def stream():
     data={"model":"fixture-chat","stream":True,"stream_options":{"include_usage":True},"max_tokens":20,"messages":[{"role":"user","content":"hello"}]}
@@ -48,10 +48,11 @@ def stream():
     except HTTPError as error:
         return error.code, error.read().decode()
 
+# Limits count recorded spend, so concurrent requests below the limit all pass.
 with concurrent.futures.ThreadPoolExecutor() as pool:
     results=list(pool.map(lambda _:stream(),range(2)))
-assert sorted(x[0] for x in results)==[200,429],results
-turn_id=next(x[1] for x in results if x[0]==200)
+assert [x[0] for x in results]==[200,200],results
+turn_id=results[0][1]
 def settled():
     data=admin("turns/"+turn_id)
     if data["turn"]["cost"] is None:
@@ -60,12 +61,59 @@ def settled():
 try:
     data=wait(settled,"usage did not settle")
 except AssertionError:
-    print(json.dumps({"events":admin("events"),"turn":admin("turns/"+turn_id)["turn"]}))
+    print(json.dumps({"events":admin("events")["rows"],"turn":admin("turns/"+turn_id)["turn"]}))
     raise
 assert data["turn"]["cost"]==28000,data["turn"]
 assert data["body"]["output"]["text"]=="alpha beta",data["body"]["output"]
 assert b"hello" in base64.b64decode(data["body"]["request_raw"])
-assert admin("sessions")[0]["session"]=="fixture-session"
-state=admin("keys")[0]
-assert state["spent"]==28000 and state["admission_capacity"]==2_972_000,state
-print("official CPA v8: SSE immediate forwarding, 429 under concurrency, settlement, transcript and session passed")
+listed=admin("sessions")
+assert listed["total"]>=1 and listed["rows"][0]["session"]=="fixture-session"
+assert admin("sessions?to=1")["total"]==0 and admin("sessions?size=1&page=%d"%(listed["total"]+1))["rows"]==[]
+turns=admin("sessions?"+urllib.parse.urlencode({"key":listed["rows"][0]["key_id"],"session":"fixture-session","size":1}))
+assert turns["total"]==listed["rows"][0]["turns"] and len(turns["rows"])==1
+assert admin("overview?to=1")==[] and admin("series?to=1")==[]
+assert sum(r["requests"] for r in admin("series?unit=hour"))==sum(r["requests"] for r in admin("overview"))>=1
+def spent():
+    state=admin("keys")[0]
+    return state if state["spent"]==56000 else None
+state=wait(spent,"both streams were not charged")
+assert state["spent_week"]==56000 and "admission_capacity" not in state and "enabled" not in state,state
+listed=admin("events?size=1")
+assert listed["total"]>=1 and len(listed["rows"])==1 and listed["page"]==1 and listed["rows"][0]["http_status"]==200,listed
+assert admin("events?to=1")["total"]==0 and admin("events?from=%d"%(listed["rows"][0]["happened"]))["total"]>=1
+
+def call(model="fixture-chat"):
+    data={"model":model,"max_tokens":20,"messages":[{"role":"user","content":"hello"}]}
+    try:
+        with urlopen(Request(GATEWAY+"/v1/chat/completions",json.dumps(data).encode(),{"Authorization":"Bearer "+KEY,"Content-Type":"application/json"}),timeout=8) as response:
+            return response.status,response.read().decode()
+    except HTTPError as error:
+        return error.code,error.read().decode()
+def models():
+    with urlopen(Request(GATEWAY+"/v1/models",headers={"Authorization":"Bearer "+KEY}),timeout=8) as response:
+        return [m["id"] for m in json.load(response)["data"]]
+policy={"id":key["id"],"weekly":0,"total":0}
+# Whichever limit is used up first refuses the key; raising it lets requests through again.
+for weekly,total,word in ((56000,0,"weekly"),(0,56000,"total"),(56000,1_000_000,"weekly"),(1_000_000,56000,"total"),(1,1,"total")):
+    admin("keys",{**policy,"weekly":weekly,"total":total},"PUT")
+    refused=call()
+    assert refused[0]==429 and "limit_reached" in refused[1] and word+" limit reached" in refused[1],(weekly,total,refused)
+    assert models(),"a key at its limit can still list models"
+admin("keys",{**policy,"weekly":56001,"total":56001},"PUT")
+assert call()[0]==200
+wait(lambda: admin("keys")[0]["spent"]>56000,"non-stream call was not charged")
+assert call()[0]==429
+admin("keys",policy,"PUT")
+assert call()[0]==200
+assert "fixture-chat" in models()
+assert admin("keys",{**policy,"models":["other-*"," Fixture-Else "]},"PUT")["models"]==["other-*","Fixture-Else"]
+denied=call()
+assert denied[0]==403 and "model_not_allowed" in denied[1],denied
+assert models()==[],models()
+assert admin("keys")[0]["models"]==["other-*","Fixture-Else"]
+admin("keys",{**policy,"models":["FIXTURE-*"]},"PUT")
+assert call()[0]==200 and models()==["fixture-chat"],(call(),models())
+assert call("unlisted")[0]==403
+admin("keys",policy,"PUT")
+assert admin("keys")[0]["models"]==[] and call()[0]==200
+print("official CPA v8: SSE immediate forwarding, weekly and total limits, settlement, transcript, session, paged request list and per-key model restriction passed")

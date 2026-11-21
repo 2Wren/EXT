@@ -70,11 +70,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err := ledger.Close(); err != nil {
-			log.Printf("release unused leases: %v", err)
-		}
-	}()
 	upstream, err := url.Parse(strings.TrimRight(env("CPA_BASE_URL", "http://127.0.0.1:8317"), "/"))
 	if err != nil || upstream.Host == "" || (upstream.Scheme != "http" && upstream.Scheme != "https") || upstream.Path != "" || upstream.User != nil || upstream.RawQuery != "" || upstream.Fragment != "" {
 		return errors.New("invalid CPA_BASE_URL")

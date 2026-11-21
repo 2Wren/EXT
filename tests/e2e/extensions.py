@@ -24,7 +24,7 @@ active=[p for p in prices if p["protocol"]=="chat" and p["model"]=="gpt-4o" and 
 assert len(active)==1 and active[0]["input"]==1234 and not active[0]["is_reference"] and active[0]["source"]=="manual"
 assert next(p for p in prices if p["id"]==reference["id"])["input"]==2500
 try:
-    api("keys",{"id":"0"*64,"name":"unknown","daily":0,"total":0,"enabled":True},"PUT")
+    api("keys",{"id":"0"*64,"weekly":0,"total":0},"PUT")
     raise AssertionError("unknown CPA key accepted")
 except HTTPError as e:
     assert e.code==404,e.code

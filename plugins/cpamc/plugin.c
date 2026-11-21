@@ -29,13 +29,13 @@ static void shutdown_plugin(void) {}
 static int dispatch(char *method, uint8_t *request, size_t length, buffer *out) {
     static const char metadata[] =
         "{\"ok\":true,\"result\":{\"schema_version\":1,\"metadata\":{"
-        "\"Name\":\"cpa-ext\",\"Version\":\"0.1.0\",\"Author\":\"cpa-ext\","
+        "\"Name\":\"EXT\",\"Version\":\"0.1.0\",\"Author\":\"cpa-ext\","
         "\"GitHubRepository\":\"http://127.0.0.1:8482/cpa-ext/\"},"
         "\"capabilities\":{\"management_api\":true}}}";
     static const char resources[] =
         "{\"ok\":true,\"result\":{\"resources\":[{"
-        "\"Path\":\"/open\",\"Menu\":\"cpa-ext\","
-        "\"Description\":\"用量、Key 额度与会话审计\"}]}}";
+        "\"Path\":\"/open\",\"Menu\":\"EXT\","
+        "\"Description\":\"用量、密钥限制与会话审计\"}]}}";
     static const char redirect[] =
         "{\"ok\":true,\"result\":{\"StatusCode\":302,\"Headers\":{"
         "\"Location\":[\"/cpa-ext/?embed=cpamc\"],\"Cache-Control\":[\"no-store\"]}}}";

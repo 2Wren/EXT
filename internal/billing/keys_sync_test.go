@@ -4,7 +4,6 @@ import (
 	"cpa-ext/internal/store"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestKeySyncPolicyDeletionAndRestore(t *testing.T) {
@@ -25,36 +24,24 @@ func TestKeySyncPolicyDeletionAndRestore(t *testing.T) {
 	if !l.Enabled(id) {
 		t.Fatal("new key not enabled")
 	}
-	if _, err = l.Admit(id, "chat", "unknown", 0, false, Day(time.Now())); err != nil {
+	if _, err = l.Admit(id, "chat", "unknown"); err != nil {
 		t.Fatal("new key not unlimited", err)
 	}
-	if err = l.UpdateKey(Key{ID: id, Name: "Alice", Enabled: false, Daily: USD, Total: 2 * USD}); err != nil {
+	if err = l.UpdateKey(Key{ID: id, Name: "ignored for a known key", Weekly: USD, Total: 2 * USD}); err != nil {
 		t.Fatal(err)
 	}
 	if err = l.SyncKeys([]SyncedKey{k}); err != nil {
 		t.Fatal(err)
 	}
 	var name string
-	var enabled bool
-	var daily, total int64
-	if err = db.QueryRow("SELECT name,enabled,daily,total FROM keys WHERE id=?", id).Scan(&name, &enabled, &daily, &total); err != nil {
+	var weekly, total int64
+	if err = db.QueryRow("SELECT name,weekly,total FROM keys WHERE id=?", id).Scan(&name, &weekly, &total); err != nil {
 		t.Fatal(err)
 	}
-	if name != "Alice" || enabled || daily != USD || total != 2*USD {
-		t.Fatal("policy replaced")
+	if name != k.MaskedKey || weekly != USD || total != 2*USD {
+		t.Fatal("policy replaced", name, weekly, total)
 	}
-	if err = l.UpdateKey(Key{ID: id, Name: name, Enabled: true, Daily: daily, Total: total}); err != nil {
-		t.Fatal(err)
-	}
-	l.SetHealthy(true)
-	if err = l.AddPrice(Price{Protocol: "chat", Model: "m", BilledModel: "m", MaxInput: 1, MaxOutput: 1, Output: 100, Verified: true}); err != nil {
-		t.Fatal(err)
-	}
-	if err = l.Refresh(); err != nil {
-		t.Fatal(err)
-	}
-	grant, err := l.Admit(id, "chat", "m", 1, true, Day(time.Now()))
-	if err != nil {
+	if _, err = l.Admit(id, "chat", "m"); err != nil {
 		t.Fatal(err)
 	}
 	if err = l.SyncKeys([]SyncedKey{}); err != nil {
@@ -63,15 +50,8 @@ func TestKeySyncPolicyDeletionAndRestore(t *testing.T) {
 	if l.Enabled(id) {
 		t.Fatal("deleted key enabled")
 	}
-	if _, err = l.Admit(id, "chat", "m", 1, true, Day(time.Now())); err != ErrDisabled {
+	if _, err = l.Admit(id, "chat", "m"); err != ErrDisabled {
 		t.Fatal("deleted key admitted", err)
-	}
-	var held int64
-	if err = db.QueryRow("SELECT held FROM leases WHERE id=?", grant.LeaseID).Scan(&held); err != nil {
-		t.Fatal(err)
-	}
-	if held != grant.Amount {
-		t.Fatalf("inflight lost: held=%d grant=%d", held, grant.Amount)
 	}
 	var count int
 	db.QueryRow("SELECT count(*) FROM keys WHERE id=?", id).Scan(&count)
@@ -106,7 +86,7 @@ func TestKeySyncFirstStartAndFailedSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := strings.Repeat("b", 64)
-	if err = l.UpdateKey(Key{ID: id, Enabled: true}); err != nil {
+	if err = l.UpdateKey(Key{ID: id}); err != nil {
 		t.Fatal(err)
 	}
 	if err = l.InitializeKeySync(); err != nil {
@@ -130,5 +110,28 @@ func TestKeySyncFirstStartAndFailedSnapshot(t *testing.T) {
 	var last string
 	if err = db.QueryRow("SELECT last_success FROM cpa_keys_sync WHERE id=1").Scan(&last); err != nil || last == "" {
 		t.Fatal("empty snapshot marker missing", err)
+	}
+}
+
+func TestAllowsModel(t *testing.T) {
+	for _, c := range []struct {
+		allowed []string
+		model   string
+		want    bool
+	}{
+		{nil, "anything", true},
+		{[]string{"claude-opus-5"}, "claude-opus-5", true},
+		{[]string{"claude-opus-5"}, "claude-opus-5-5", false},
+		{[]string{"Claude-Opus-5"}, "devin/claude-opus-5", true},
+		{[]string{"devin/claude-opus-5"}, "claude-opus-5", false},
+		{[]string{"gemini-*"}, "models/gemini-3-pro", true},
+		{[]string{"*-preview", "gpt-5"}, "gemini-3-pro-preview", true},
+		{[]string{"claude-*-5"}, "claude-5", false},
+		{[]string{"*fable*"}, "claude-fable-5-2", true},
+		{[]string{"gpt-5"}, "", false},
+	} {
+		if got := AllowsModel(c.allowed, c.model); got != c.want {
+			t.Errorf("AllowsModel(%q,%q)=%v", c.allowed, c.model, got)
+		}
 	}
 }

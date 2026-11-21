@@ -1,12 +1,12 @@
-const names={overview:'用量总览',keys:'Key 额度',events:'消费流水',sessions:'会话审计'};
+const names={overview:'用量总览',keys:'密钥限制',events:'请求明细',sessions:'会话审计'};
 const content=document.querySelector('#content');
 const loginForm=document.querySelector('#login-form');
 const root=document.documentElement;
 const descriptions={
  overview:'CPA 请求、Token、费用与缓存命中。时间以北京时间统计。',
- keys:'Key 额度与消费。',
- events:'查看 CPA 上报的用量、结算状态与关联会话。',
- sessions:'按会话检查请求正文、模型回复与工具调用。'
+ keys:'按密钥设置周限额、总限额和可调用模型，并查看消费。',
+ events:'逐条查看 CPA 上报的请求：用量、费用、结果与关联会话。',
+ sessions:'按会话检查请求正文、模型回复与工具调用。列出所选时间内有请求的会话。'
 };
 const message=document.querySelector('#message');
 const usd=n=>n==null?'待计价':'$'+(n/1e9).toLocaleString('en-US',{maximumFractionDigits:9});
@@ -134,25 +134,79 @@ async function showTurn(id){
 }
 async function showSession(row){
  const token=++epoch;
- const query=new URLSearchParams({key:row.key_id,session:row.session});
- const rows=await api('sessions?'+query);
+ const q=new URLSearchParams({key:row.key_id,session:row.session,page:query.page.turns,size:query.size.turns});
+ const data=await api('sessions?'+q);
  if(token!==epoch)return;
  const heading=element('div',null,'crumbs');
  heading.append(action('返回会话',()=>load('sessions')),element('h2',keyName(row.key_id)+' · '+row.session));
  content.replaceChildren(heading,
- table(rows,[['请求时间',r=>date(r.started)],['模型','model'],['状态','status'],['费用',r=>usd(r.cost)],['Token',r=>integer(r.total)],['正文','audit_state'],['详情',r=>action('查看',()=>showTurn(r.id))]]));
+  table(data.rows,[['请求时间',r=>date(r.started)],['模型','model'],['状态','status'],['费用',r=>usd(r.cost)],['Token',r=>integer(r.total)],['正文','audit_state'],['详情',r=>action('查看',()=>showTurn(r.id))]]),
+  pager('turns',data.total,()=>showSession(row)));
 }
-function keyForm(row){
+// CPAMC keeps client key names only in this browser: localStorage on the shared
+// origin, one entry per API base, XOR-masked with the host. Only CPAMC's name
+// identifiers are stored there, so the server matches them to the keys.
+function cpamcNames(){
+ const found=[],prefix='api-key-names:v1:',seed='cli-proxy-api-webui::secure-storage|'+location.host;
+ try{
+  for(let n=0;n<localStorage.length;n++){
+   const slot=localStorage.key(n);
+   if(!slot.startsWith(prefix))continue;
+   try{
+    let text=localStorage.getItem(slot);
+    const masked=/^enc::v([12])::/.exec(text);
+    if(masked){
+     const pad=new TextEncoder().encode(masked[1]==='1'?seed+'|'+navigator.userAgent:seed);
+     const bytes=Uint8Array.from(atob(text.slice(masked[0].length)),c=>c.charCodeAt(0));
+     text=new TextDecoder().decode(bytes.map((b,i)=>b^pad[i%pad.length]));
+    }
+    const names=Object.fromEntries(Object.entries(JSON.parse(text)).filter(([id,name])=>/^[a-f0-9]{64}$/.test(id)&&typeof name==='string'&&name.trim()));
+    if(Object.keys(names).length)found.push({base:slot.slice(prefix.length),names});
+   }catch{}
+  }
+ }catch{}
+ return found.sort((a,b)=>a.base.startsWith(location.origin)-b.base.startsWith(location.origin));
+}
+async function syncNames(){
+ for(const {base,names} of cpamcNames()){
+  try{await api('keys/names',{method:'POST',body:JSON.stringify({base,names})});}catch{}
+ }
+}
+const modelList=text=>text.split(/[,，\s]+/).filter(Boolean);
+function keyForm(row,close){
  const f=form([
-  ['name','显示名称','text',row.name],
-  ['daily','日额度 USD（0 为无限）','number',(row.daily||0)/1e9],
-  ['total','总额度 USD（0 为无限）','number',(row.total||0)/1e9],
-  ['enabled','允许通过扩展网关（关闭将拒绝请求）','checkbox',row.enabled]
- ],data=>api('keys',{method:'PUT',body:JSON.stringify({...data,id:row.id,daily:Math.round(data.daily*1e9),total:Math.round(data.total*1e9)})}));
- if(row.cpa_present===false)f.querySelectorAll('input,button').forEach(n=>n.disabled=true);
+  ['weekly','周限额 USD','number',(row.weekly||0)/1e9],
+  ['total','总限额 USD','number',(row.total||0)/1e9],
+  ['models','可调用模型','text',(row.models||[]).join(', ')]
+ ],data=>api('keys',{method:'PUT',body:JSON.stringify({id:row.id,weekly:Math.round(data.weekly*1e9),total:Math.round(data.total*1e9),models:modelList(data.models)})}));
+ f.classList.add('key-form');
+ const allowed=f.querySelector('input[type=text]'),field=allowed.closest('label');
+ allowed.placeholder='留空为不限；多个模型用逗号分隔，* 为通配';field.classList.add('wide');
+ field.before(element('p','0 为不限。周限额按北京时间每周一 0 点重新计算；两项都设置时，先用完的一项生效，用完后该密钥的请求会被拒绝。','muted hint'));
+ const actions=element('div',null,'actions');
+ actions.append(f.querySelector('button.primary'),action('关闭',close));
+ f.append(actions);
+ api('models').then(list=>{
+  if(!list.length)return;
+  const chips=element('div',null,'chips');
+  chips.append(element('small','CPA 当前模型，点击加入或移除：','muted'));
+  const paint=()=>{const chosen=modelList(allowed.value);chips.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(chosen.includes(b.textContent))));};
+  for(const model of list){
+   const chip=element('button',model.id,'chip');chip.type='button';chip.disabled=allowed.disabled;
+   chip.addEventListener('click',()=>{
+    const chosen=modelList(allowed.value),at=chosen.indexOf(model.id);
+    at<0?chosen.push(model.id):chosen.splice(at,1);
+    allowed.value=chosen.join(', ');paint();
+   });
+   chips.append(chip);
+  }
+  allowed.addEventListener('input',paint);paint();
+  field.after(chips);
+ }).catch(()=>{});
+ if(row.cpa_present===false)f.querySelectorAll('input,button.primary').forEach(n=>n.disabled=true);
  return f;
 }
-function timeSeries(series,days){
+function timeSeries(points){
  const box=element('section',null,'panel');
  const heading=element('div',null,'chart-heading');
  const select=element('select');select.setAttribute('aria-label','趋势指标');
@@ -160,15 +214,11 @@ function timeSeries(series,days){
   const option=element('option',label);option.value=key;select.append(option);
  }
  heading.append(element('h2','用量趋势'),select);box.append(heading);
- if(!series.length){
-  select.disabled=true;box.append(element('div','产生首笔请求后，这里会显示用量趋势。','chart-empty'));return box;
+ if(points.length<2){
+  select.disabled=true;box.append(element('div','所选时间内没有请求。','chart-empty'));return box;
  }
- const index=new Map(series.map(row=>[row.day,row]));
- const now=Date.now()+8*3600000;
- const points=Array.from({length:days},(_,i)=>{
-  const day=new Date(now-(days-1-i)*86400000).toISOString().slice(0,10);
-  return index.get(day)||{day,requests:0,tokens:0,cost:0};
- });
+ // Hours within one day are labelled by the hour alone.
+ const tick=points[0].bucket.slice(0,10)===points.at(-1).bucket.slice(0,10)?11:5;
  const canvas=element('canvas',null,'chart-canvas');
  canvas.setAttribute('role','img');
  canvas.tabIndex=0;
@@ -205,7 +255,7 @@ function timeSeries(series,days){
   const stride=Math.ceil((points.length-1)/Math.max(2,Math.floor(width/72)));
   const labelAt=new Set([0,points.length-1]);
   for(let i=stride;i<points.length-stride/2;i+=stride)labelAt.add(i);
-  for(const i of labelAt){ctx.textAlign=i===0?'left':i===points.length-1?'right':'center';ctx.fillText(points[i].day.slice(5),x(i),h-5);}
+  for(const i of labelAt){ctx.textAlign=i===0?'left':i===points.length-1?'right':'center';ctx.fillText(points[i].bucket.slice(tick),x(i),h-5);}
   ctx.beginPath();values.forEach((v,i)=>i?ctx.lineTo(x(i),y(v)):ctx.moveTo(x(i),y(v)));
   ctx.lineTo(x(values.length-1),y(0));ctx.lineTo(x(0),y(0));ctx.closePath();
   ctx.fillStyle=color('--accent-soft');ctx.fill();
@@ -216,7 +266,7 @@ function timeSeries(series,days){
   ctx.moveTo(selectedX,pad.top);ctx.lineTo(selectedX,pad.top+height);ctx.stroke();
   ctx.fillStyle=color('--accent');ctx.beginPath();
   ctx.arc(selectedX,y(values[selected]),3.5,0,Math.PI*2);ctx.fill();
-  readout.textContent=points[selected].day+' · '+(key==='cost'?usdSummary(values[selected]):integer(values[selected]));
+  readout.textContent=points[selected].bucket+' · '+(key==='cost'?usdSummary(values[selected]):integer(values[selected]));
  };
  select.addEventListener('change',draw);
  canvas.addEventListener('pointermove',event=>{
@@ -270,7 +320,7 @@ function state(text,kind){
  marker.append(element('span'),document.createTextNode(text));return marker;
 }
 
-function usageCards(rows,series,days){
+function usageCards(rows,series,points){
  const count=(items,key)=>items.reduce((n,row)=>n+(row[key]||0),0);
  const requests=count(series,'requests');
  const tokens=count(series,'tokens');
@@ -288,11 +338,7 @@ function usageCards(rows,series,days){
   ['请求成功率',requests?rate((requests-fails)/requests):'—','successRate','live',integer(fails)+' 次失败'],
  ];
  const grid=element('div',null,'cards usage-cards');
- const index=new Map(series.map(row=>[row.day,row]));
- const now=Date.now()+8*3600000;
- const points=Array.from({length:days},(_,i)=>index.get(new Date(now-(days-1-i)*86400000).toISOString().slice(0,10)));
  const value=(point,key)=>{
-  if(!point)return 0;
   if(key==='cacheRate')return point.input_tokens?point.cached/point.input_tokens:0;
   if(key==='successRate')return point.requests?(point.requests-(point.failures||0))/point.requests:0;
   return point[key]||0;
@@ -300,7 +346,7 @@ function usageCards(rows,series,days){
  for(const [label,number,key,tone,note] of metrics){
   const card=element('div',null,'card kpi kpi-'+tone);
   card.append(element('small',label),element('strong',number),element('p',note,'kpi-note'));
-  if(series.length){
+  if(points.length>1){
    const spark=element('canvas',null,'sparkline');
    spark.width=320;spark.height=43;spark.setAttribute('aria-hidden','true');
    card.append(spark);
@@ -321,54 +367,161 @@ function usageCards(rows,series,days){
  return grid;
 }
 
+// One period selection for the overview, the request list and the sessions.
+// Periods follow Beijing days, like the rest of the page.
+const DAY=86400000,SHIFT=8*3600000;
+const query={period:'today',from:'',to:'',page:{overview:1,events:1,sessions:1,turns:1},size:{overview:20,events:50,sessions:50,turns:50}};
+function range(){
+ const midnight=Math.floor((Date.now()+SHIFT)/DAY)*DAY-SHIFT;
+ const at=v=>{const n=Date.parse(v+':00+08:00');return Number.isFinite(n)?n:null;};
+ switch(query.period){
+  case 'today':return [midnight,null];
+  case 'yesterday':return [midnight-DAY,midnight];
+  case '7':return [midnight-6*DAY,null];
+  case '30':return [midnight-29*DAY,null];
+  case 'custom':return [at(query.from),at(query.to)];
+ }
+ return [null,null];
+}
+function ranged(path,extra){
+ const [from,to]=range(),q=new URLSearchParams(extra);
+ if(from!=null)q.set('from',from);
+ if(to!=null)q.set('to',to);
+ return path+'?'+q;
+}
+const paged=view=>ranged(view,{page:query.page[view],size:query.size[view]});
+function periodFilter(summary){
+ const bar=element('div',null,'filter');
+ const period=element('select');period.setAttribute('aria-label','时间周期');
+ for(const [value,label] of [['today','今天'],['yesterday','昨天'],['7','近 7 天'],['30','近 30 天'],['all','全部'],['custom','自定义时间']]){
+  const option=element('option',label);option.value=value;period.append(option);
+ }
+ period.value=query.period;
+ const restart=()=>{for(const view in query.page)query.page[view]=1;return load(active);};
+ period.addEventListener('change',()=>{
+  if(period.value==='custom'&&!query.from&&!query.to){
+   // Start the custom period from the one on screen.
+   const stamp=ms=>ms==null?'':new Date(ms+SHIFT).toISOString().slice(0,16);
+   [query.from,query.to]=range().map(stamp);
+  }
+  query.period=period.value;restart();
+ });
+ bar.append(period);
+ if(query.period==='custom'){
+  const inputs=['from','to'].map(name=>{
+   const input=element('input');input.type='datetime-local';input.value=query[name];
+   input.setAttribute('aria-label',name==='from'?'开始时间（北京时间）':'结束时间（北京时间）');
+   return input;
+  });
+  bar.append(inputs[0],element('span','至','muted'),inputs[1],action('查询',()=>{
+   query.from=inputs[0].value;query.to=inputs[1].value;return restart();
+  },'primary'));
+ }
+ if(summary)bar.append(element('span',summary,'muted filter-summary'));
+ return bar;
+}
+function pager(view,total,show){
+ const page=query.page[view],pages=Math.max(1,Math.ceil(total/query.size[view])),bar=element('div',null,'pager');
+ const turn=(label,to)=>{const b=action(label,()=>{query.page[view]=to;return show();});b.disabled=to<1||to>pages||to===page;return b;};
+ const size=element('select');size.setAttribute('aria-label','每页条数');
+ for(const n of [20,50,100,200]){const option=element('option','每页 '+n+' 条');option.value=n;size.append(option);}
+ size.value=query.size[view];
+ size.addEventListener('change',()=>{
+  query.size[view]=Number(size.value);query.page[view]=1;
+  Promise.resolve().then(show).catch(error=>notice(error.message,true));
+ });
+ bar.append(size,turn('首页',1),turn('上一页',page-1),element('span','第 '+page+' / '+pages+' 页','muted'),turn('下一页',page+1),turn('末页',pages));
+ return bar;
+}
+// The trend is drawn per hour for a period of up to two days, per day otherwise.
+function chartUnit(){
+ const [from,to]=range();
+ return from!=null&&(to??Date.now())-from<=2*DAY?'hour':'day';
+}
+// buckets lays the series out over the whole period, with empty hours or days
+// filled in. A period without a start, or a very long one, begins at the first request.
+function buckets(series){
+ if(!series.length)return [];
+ const hourly=chartUnit()==='hour',step=hourly?3600000:DAY;
+ const label=ms=>{const text=new Date(ms+SHIFT).toISOString();return hourly?text.slice(0,13).replace('T',' ')+':00':text.slice(0,10);};
+ const [from,to]=range(),index=new Map(series.map(row=>[row.bucket,row]));
+ const first=Date.parse((hourly?series[0].bucket.replace(' ','T')+':00':series[0].bucket+'T00:00:00')+'+08:00');
+ const end=Math.min(to==null?Infinity:to-1,Date.now());
+ let start=from??first;
+ if((end-start)/step>400)start=Math.max(start,first);
+ const origin=Math.floor((start+SHIFT)/step)*step-SHIFT,points=[];
+ const point=at=>index.get(label(at))||{bucket:label(at),requests:0,tokens:0,cost:0};
+ for(let at=origin;at<=end;at+=step)points.push(point(at));
+ // A line needs two points.
+ if(points.length===1)points.unshift(point(origin-step));
+ return points;
+}
+
 const views={
- overview:(rows,series,days)=>{
+ overview:(rows,series)=>{
   const sum=name=>rows.reduce((n,row)=>n+(row[name]||0),0);
-  const all=sum('requests');
+  const all=sum('requests'),points=buckets(series);
   const charts=element('div',null,'chart-grid');
-  charts.append(timeSeries(series,days),sharePanel(rows));
-  return [usageCards(rows,series,days),charts,element('h2','模型与 Key 明细','section-heading'),
-   table(rows,[['模型','model'],['API Key',r=>keyName(r.key_id)],['请求占比',r=>all?(100*r.requests/all).toFixed(1)+'%':'—'],['Token',r=>integer(r.total)],['费用',r=>usd(r.cost)],['缓存 %','cache_pct'],['平均延迟 ms','latency'],['平均首 Token ms','ttft']])];
+  charts.append(timeSeries(points),sharePanel(rows));
+  const detail=element('div');
+  const paint=()=>{
+   const size=query.size.overview;
+   query.page.overview=Math.min(query.page.overview,Math.max(1,Math.ceil(rows.length/size)));
+   const start=(query.page.overview-1)*size;
+   detail.replaceChildren(table(rows.slice(start,start+size),[['模型','model'],['API Key',r=>keyName(r.key_id)],['请求占比',r=>all?(100*r.requests/all).toFixed(1)+'%':'—'],['Token',r=>integer(r.total)],['费用',r=>usd(r.cost)],['缓存 %','cache_pct'],['平均延迟 ms','latency'],['平均首 Token ms','ttft']]),
+    pager('overview',rows.length,paint));
+  };
+  paint();
+  return [periodFilter(),usageCards(rows,series,points),charts,element('h2','模型与 Key 明细','section-heading'),detail];
  },
  keys:rows=>{
-  const editor=panel('编辑额度',element('div'));editor.id='key-editor';editor.hidden=true;
+  const editor=panel('编辑限制',element('div'));editor.id='key-editor';editor.hidden=true;
   const keyCell=r=>{
    const label=element('span',r.name||r.masked_key||keyName(r.id));
    if(r.name && r.masked_key && r.name!==r.masked_key)label.append(element('small',' · '+r.masked_key,'muted'));
-   if(!r.enabled)label.append(document.createTextNode(' '),state('已停用','error'));
+   if((r.weekly&&r.spent_week>=r.weekly)||(r.total&&r.spent>=r.total))label.append(document.createTextNode(' '),state('已达限额','error'));
    return label;
   };
   const rowsTable=table(rows.filter(r=>r.cpa_present!==false),[
-   ['Key',keyCell],['日额度',r=>r.daily?usd(r.daily):'无限'],['总额度',r=>r.total?usd(r.total):'无限'],
-   ['今日消费',r=>usd(r.spent_today)],['累计消费',r=>usd(r.spent)],
+   ['密钥',keyCell],['周限额',r=>r.weekly?usd(r.weekly):'不限'],['总限额',r=>r.total?usd(r.total):'不限'],['可调用模型',r=>r.models?.length?r.models.join('、'):'全部'],
+   ['本周消费',r=>usd(r.spent_week)],['累计消费',r=>usd(r.spent)],
    ['操作',r=>action('编辑',()=>{
-    editor.hidden=false;editor.replaceChildren(element('h2','编辑额度 · '+(r.name||r.masked_key||keyName(r.id))),keyForm(r),action('关闭',()=>{editor.hidden=true;}));
+    editor.hidden=false;editor.replaceChildren(element('h2','编辑限制 · '+(r.name||r.masked_key||keyName(r.id))),keyForm(r,()=>{editor.hidden=true;}));
     editor.scrollIntoView({block:'nearest',behavior:'smooth'});
    })]
   ]);
   return [rowsTable,editor];
  },
- events:rows=>[table(rows,[['时间',r=>date(r.happened)],['API Key',r=>keyName(r.key_id)],['模型','model'],['输入',r=>integer(r.input)],['输出',r=>integer(r.output)],['缓存',r=>integer(r.cached)],['费用',r=>usd(r.cost)],['状态',r=>{const s=state(r.blocked||(r.cost==null?'待计价':r.approx?'已结算 · 估算':'已结算'),r.blocked?'error':r.cost==null?'pending':'ok');if(!r.blocked&&r.cost==null)s.title='价格表中暂无该模型，同步到价格后自动结算';return s;}],['Turn',r=>r.turn_id?action('查看',()=>showTurn(r.turn_id)):'—']])],
- sessions:rows=>[table(rows,[['最后更新',r=>date(r.started)],['API Key',r=>keyName(r.key_id)],['会话','session'],['轮次','turns'],['费用',r=>usd(r.cost)],['操作',r=>action('打开',()=>showSession(r),'row-action')]])],
+ events:data=>{
+  const billing=r=>{
+   const s=state(r.blocked||(r.cost==null?'待计价':r.approx?'已结算 · 估算':'已结算'),r.blocked?'error':r.cost==null?'pending':'ok');
+   if(!r.blocked&&r.cost==null)s.title='价格表中暂无该模型，同步到价格后自动结算';
+   return s;
+  };
+  const result=r=>r.failed?state('失败'+(r.http_status>=400?' · '+r.http_status:''),'error'):state('成功','ok');
+  return [periodFilter('共 '+integer(data.total)+' 条 · 失败 '+integer(data.failed)+' · 费用 '+usdSummary(data.cost)),table(data.rows,[['时间',r=>date(r.happened)],['API Key',r=>keyName(r.key_id)],['模型','model'],['输入',r=>integer(r.input)],['输出',r=>integer(r.output)],['缓存',r=>integer(r.cached)],['费用',r=>usd(r.cost)],['耗时',r=>r.latency?(r.latency/1000).toFixed(1)+' s':'—'],['结果',result],['计费',billing],['会话',r=>r.turn_id?action('查看',()=>showTurn(r.turn_id)):'—']]),pager('events',data.total,()=>load('events'))];
+ },
+ sessions:data=>[periodFilter('共 '+integer(data.total)+' 个会话'),
+  table(data.rows,[['最后更新',r=>date(r.started)],['API Key',r=>keyName(r.key_id)],['会话','session'],['轮次','turns'],['费用',r=>usd(r.cost)],['操作',r=>action('打开',()=>{query.page.turns=1;return showSession(r);},'row-action')]]),
+  pager('sessions',data.total,()=>load('sessions'))],
 
 };
 async function load(page){
  const token=++epoch;active=page;notice();chartObserver?.disconnect();repaintCharts=[];
- const days=Number(document.querySelector('#days').value);
- document.querySelector('#days').closest('label').hidden=page!=='overview';
- document.title=names[page]+' · cpa-ext';
+ document.title=names[page]+' · EXT';
  document.querySelector('#description').textContent=descriptions[page];
  document.querySelectorAll('nav button').forEach(b=>b.setAttribute('aria-current',String(b.dataset.page===page)));
  content.replaceChildren(element('p','正在加载…','muted'));
  try{
+  await syncNames();
   const [rows,keys,series]=await Promise.all([
-   api(page==='overview'?'overview?days='+days:page),
+   api(page==='overview'?ranged('overview'):page==='keys'?page:paged(page)),
    page==='keys'?null:api('keys'),
-   page==='overview'?api('series?days='+days):[],
+   page==='overview'?api(ranged('series',{unit:chartUnit()})):[],
     page==='keys'?api('keys/sync').catch(error=>({error:error.message})):page==='prices'?api('models').then(models=>({models})).catch(error=>({models_error:error.message})):null
   ]);
   for(const key of keys||(page==='keys'?rows:[]))if(key.name)keyNames.set(key.id,key.name);
-  if(token===epoch)content.replaceChildren(...views[page](rows,series,days));
+  if(token===epoch)content.replaceChildren(...views[page](rows,series));
  }catch(error){
   if(token===epoch){content.replaceChildren();notice(error.message,true);}
  }
@@ -472,7 +625,6 @@ if(loginForm){
 }else{
  document.querySelectorAll('nav button').forEach(b=>b.addEventListener('click',()=>{location.hash=b.dataset.page;}));
  document.querySelector('#refresh').addEventListener('click',()=>{load(active);monitor();});
- document.querySelector('#days').addEventListener('change',()=>load('overview'));
  document.querySelector('#logout').addEventListener('click',async ()=>{
   try{await api('logout',{method:'POST',body:'{}'});location.reload();}
   catch(error){notice(error.message,true);}
