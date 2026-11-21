@@ -18,6 +18,7 @@ const date=n=>n?new Date(n).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}):'
 const flag=n=>n?'是':'否';
 const keyNames=new Map();
 let active='overview', epoch=0, chartObserver;
+let repaintCharts=[];
 const element=(tag,value,cls)=>{
  const n=document.createElement(tag);
  if(value!=null)n.textContent=value;
@@ -225,6 +226,7 @@ function timeSeries(series,days){
   draw();
  });
  chartObserver=new ResizeObserver(draw);chartObserver.observe(canvas);
+ repaintCharts.push(draw);
  return box;
 }
 
@@ -273,11 +275,11 @@ function usageCards(rows,series,days){
  const input=count(series,'input_tokens')||count(rows,'input')+count(rows,'cached')+count(rows,'cache_write');
  const rate=n=>(100*n).toFixed(1)+'%';
  const metrics=[
-  ['请求数',integer(requests),'requests','blue',requests?integer(requests-fails)+' 次成功':'等待首笔请求'],
-  ['总 Token',integer(tokens),'tokens','violet',cached?'缓存命中 '+integer(cached)+' Token':'输入、输出与缓存'],
-  ['已计价费用',usdSummary(spend),'cost','amber',pending?pending+' 笔待计价':'按模型价格估算'],
-  ['缓存命中率',input?rate((cached||count(rows,'cached'))/input):'—','cacheRate','green',input?integer(input)+' 输入 Token':'等待用量统计'],
-  ['请求成功率',requests?rate((requests-fails)/requests):'—','successRate','sky',integer(fails)+' 次失败'],
+  ['请求数',integer(requests),'requests','live',requests?integer(requests-fails)+' 次成功':'等待首笔请求'],
+  ['总 Token',integer(tokens),'tokens','neutral',cached?'缓存命中 '+integer(cached)+' Token':'输入、输出与缓存'],
+  ['已计价费用',usdSummary(spend),'cost','neutral',pending?pending+' 笔待计价':'按模型价格估算'],
+  ['缓存命中率',input?rate((cached||count(rows,'cached'))/input):'—','cacheRate','neutral',input?integer(input)+' 输入 Token':'等待用量统计'],
+  ['请求成功率',requests?rate((requests-fails)/requests):'—','successRate','live',integer(fails)+' 次失败'],
  ];
  const grid=element('div',null,'cards usage-cards');
  const index=new Map(series.map(row=>[row.day,row]));
@@ -296,15 +298,17 @@ function usageCards(rows,series,days){
    const spark=element('canvas',null,'sparkline');
    spark.width=320;spark.height=43;spark.setAttribute('aria-hidden','true');
    card.append(spark);
-   requestAnimationFrame(()=>{
+   const draw=()=>{
     if(!spark.isConnected)return;
     const ctx=spark.getContext('2d'),color=getComputedStyle(card).getPropertyValue('--tone').trim();
     const values=points.map(point=>value(point,key));
     const max=Math.max(...values)||1;
+    ctx.clearRect(0,0,spark.width,spark.height);
     ctx.beginPath();
     values.forEach((v,i)=>{const x=i*319/(values.length-1),y=39-(v/max)*32;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
     ctx.strokeStyle=color;ctx.lineWidth=2;ctx.lineJoin='round';ctx.stroke();
-   });
+   };
+   repaintCharts.push(draw);requestAnimationFrame(draw);
   }
   grid.append(card);
  }
@@ -338,10 +342,10 @@ const views={
  credentials:rows=>[table(rows,[['名称','name'],['供应商','provider'],['状态','status'],['停用',r=>flag(r.disabled)],['不可用',r=>flag(r.unavailable)]])]
 };
 async function load(page){
- const token=++epoch;active=page;notice();chartObserver?.disconnect();
+ const token=++epoch;active=page;notice();chartObserver?.disconnect();repaintCharts=[];
  const days=Number(document.querySelector('#days').value);
  document.querySelector('#days').closest('label').hidden=page!=='overview';
- document.querySelector('#title').textContent=names[page];
+ document.title=names[page]+' · cpa-ext';
  document.querySelector('#description').textContent=descriptions[page];
  document.querySelectorAll('nav button').forEach(b=>b.setAttribute('aria-current',String(b.dataset.page===page)));
  content.replaceChildren(element('p','正在加载…','muted'));
@@ -370,23 +374,63 @@ async function monitor(){
  }
 }
 function locationPage(){const p=location.hash.slice(1);return Object.hasOwn(names,p)?p:'overview';}
-const embedded=window.parent!==window;
-if(embedded)root.dataset.embedded='';
 const preferred=matchMedia('(prefers-color-scheme: dark)');
-function syncTheme(){
- let theme=preferred.matches?'dark':'light';
- if(embedded){
+const panelThemeTokens={
+  '--host-page':'--bg-secondary',
+  '--host-card':'--bg-primary',
+  '--host-soft':'--bg-tertiary',
+  '--host-hover':'--bg-hover',
+  '--host-ink':'--text-primary',
+  '--host-muted':'--text-secondary',
+  '--host-subtle':'--text-tertiary',
+  '--host-line':'--border-color',
+  '--host-border':'--border-primary',
+  '--host-accent':'--primary-color',
+  '--host-button':'--primary-active',
+  '--host-contrast':'--primary-contrast',
+  '--host-success':'--viz-success',
+  '--host-danger':'--warning-text',
+  '--host-danger-bg':'--warning-bg',
+  '--host-shadow':'--shadow',
+  '--host-radius':'--radius-md'
+};
+
+let panelDocument;
+if(window.parent!==window){
   try {
-   const parentTheme=window.parent.document.documentElement.dataset.theme;
-   if(parentTheme==='light'||parentTheme==='dark')theme=parentTheme;
+    if(window.parent.location.origin===location.origin){
+      panelDocument=window.parent.document;
+      root.dataset.embedded='';
+    }
   }catch{}
- }
- root.dataset.theme=theme;
 }
+
+function syncTheme(){
+  let theme=preferred.matches?'dark':'white';
+  if(panelDocument){
+    const panelRoot=panelDocument.documentElement;
+    const style=window.parent.getComputedStyle(panelRoot);
+    const activeTheme=panelRoot.dataset.theme || (style.getPropertyValue('--bg-secondary').trim() ? 'light' : '');
+    if(['white','light','dark'].includes(activeTheme))theme=activeTheme;
+    for(const [local,upstream] of Object.entries(panelThemeTokens)){
+      const value=style.getPropertyValue(upstream).trim();
+      if(value)root.style.setProperty(local,value);
+      else root.style.removeProperty(local);
+    }
+    if(panelDocument.body){
+      root.style.setProperty('--host-font',window.parent.getComputedStyle(panelDocument.body).fontFamily);
+    }
+  }
+  root.dataset.theme=theme;
+  requestAnimationFrame(()=>repaintCharts.forEach(draw=>draw()));
+}
+
 syncTheme();
 preferred.addEventListener('change',syncTheme);
-if(embedded){
- try{new MutationObserver(syncTheme).observe(window.parent.document.documentElement,{attributes:true,attributeFilter:['data-theme']});}catch{}
+if(panelDocument){
+  new MutationObserver(syncTheme).observe(panelDocument.documentElement,{
+    attributes:true,attributeFilter:['data-theme']
+  });
 }
 
 if(loginForm){

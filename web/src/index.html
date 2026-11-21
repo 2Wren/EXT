@@ -7,29 +7,29 @@
   <link rel="stylesheet" href="app.css">
 </head>
 <body class="workspace">
-  <div class="workspace-bar">
-    <a class="brand" href="./" aria-label="cpa-ext 首页"><span class="brand-mark" aria-hidden="true"></span>cpa-ext</a>
-    <div class="workspace-status">
-      <p id="health" class="health" role="status"><span></span>正在连接</p>
-      <button id="logout" class="quiet" type="button">退出</button>
-    </div>
-  </div>
-  <nav class="tabs" aria-label="cpa-ext 管理">
-    <button data-page="overview" type="button">用量总览</button>
-    <button data-page="keys" type="button">Key 额度</button>
-    <button data-page="events" type="button">消费流水</button>
-    <button data-page="sessions" type="button">会话审计</button>
-    <button data-page="prices" type="button">模型价格</button>
-    <button data-page="credentials" type="button">凭证状态</button>
-  </nav>
   <main>
     <header class="page-header">
-      <div><h1 id="title"></h1><p id="description" class="description"></p></div>
-      <div class="page-actions">
-        <label class="range-picker" for="days"><span class="sr-only">时间范围</span>
-          <select id="days"><option value="7">近 7 天</option><option value="14">近 14 天</option><option value="30" selected>近 30 天</option></select>
-        </label>
-        <button id="refresh" type="button">刷新</button>
+      <div class="title-row">
+        <h1>cpa-ext</h1>
+        <nav class="tabs" aria-label="cpa-ext 管理">
+          <button data-page="overview" type="button">用量总览</button>
+          <button data-page="keys" type="button">Key 额度</button>
+          <button data-page="events" type="button">消费流水</button>
+          <button data-page="sessions" type="button">会话审计</button>
+          <button data-page="prices" type="button">模型价格</button>
+          <button data-page="credentials" type="button">凭证状态</button>
+        </nav>
+      </div>
+      <div class="toolbar">
+        <p id="description" class="description"></p>
+        <div class="page-actions">
+          <p id="health" class="health" role="status"><span></span>正在连接</p>
+          <label class="range-picker" for="days"><span class="sr-only">时间范围</span>
+            <select id="days"><option value="7">近 7 天</option><option value="14">近 14 天</option><option value="30" selected>近 30 天</option></select>
+          </label>
+          <button id="refresh" type="button">刷新</button>
+          <button id="logout" class="quiet" type="button">退出</button>
+        </div>
       </div>
     </header>
     <div id="message" role="status"></div>
