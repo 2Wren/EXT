@@ -1,5 +1,6 @@
 """Run after tests/e2e/test.py against the same Oracle fixture."""
 import base64
+import hashlib
 import json
 import statistics
 import time
@@ -27,7 +28,7 @@ def p95(samples):
     return statistics.quantiles(samples,n=20,method="inclusive")[18]
 
 basic=base64.b64encode(b"admin:fixture-administrator-secret-local-only").decode()
-policy={"secret":KEY,"name":"Benchmark","daily":1_000_000_000,"total":1_000_000_000,"enabled":True}
+policy={"id":hashlib.sha256(KEY.encode()).hexdigest(),"name":"Benchmark","daily":1_000_000_000,"total":1_000_000_000,"enabled":True}
 credentials={"Authorization":"Basic "+basic,"X-CPA-Ext-Admin":"1","Content-Type":"application/json"}
 with urlopen(Request("http://127.0.0.1:8581/api/keys",json.dumps(policy).encode(),credentials,method="PUT"),timeout=5):
     pass

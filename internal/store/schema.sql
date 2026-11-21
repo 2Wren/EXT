@@ -41,3 +41,7 @@ CREATE TABLE IF NOT EXISTS conversation_history (
  key_id TEXT NOT NULL, protocol TEXT NOT NULL, digest TEXT NOT NULL, session TEXT NOT NULL,
  PRIMARY KEY(key_id, protocol, digest, session)
 );
+
+CREATE TABLE IF NOT EXISTS cpa_keys (id TEXT PRIMARY KEY REFERENCES keys(id), masked_key TEXT NOT NULL, cpa_present INTEGER NOT NULL);
+
+CREATE TABLE IF NOT EXISTS cpa_keys_sync (id INTEGER PRIMARY KEY CHECK(id=1), last_success TEXT NOT NULL);

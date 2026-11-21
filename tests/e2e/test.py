@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import concurrent.futures
 import json
 import time
@@ -26,8 +27,11 @@ def wait(fn, description):
     raise AssertionError(description)
 
 wait(lambda: bool(admin("health").get("last_poll")) and not admin("health")["error"], "CPA collector unhealthy")
+admin("keys/sync",{},"POST")
+assert KEY not in json.dumps(admin("keys")), "client secret leaked"
+assert next(x for x in admin("keys") if x["id"]==hashlib.sha256(KEY.encode()).hexdigest())["cpa_present"]
 admin("prices",{"protocol":"chat","model":"fixture-chat","billed_model":"fixture-chat","input":1000,"output":2000,"cached":500,"cache_write":1000,"max_input":1000,"max_output":20,"verified":True},"POST")
-key = admin("keys",{"secret":KEY,"name":"Fixture","daily":3_000_000,"total":3_000_000,"enabled":True},"PUT")
+key = admin("keys",{"id":hashlib.sha256(KEY.encode()).hexdigest(),"name":"Fixture","daily":3_000_000,"total":3_000_000,"enabled":True},"PUT")
 wait(lambda: next(x for x in admin("keys") if x["id"]==key["id"])["admission_capacity"]==3_000_000,"lease not ready")
 
 def stream():

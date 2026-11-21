@@ -92,6 +92,12 @@ func run() error {
 	}}, ledger)
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	if err := ledger.InitializeKeySync(); err != nil {
+		return err
+	}
+	if err := collector.SyncKeys(ctx); err != nil {
+		log.Printf("initial CPA key synchronization (cached keys retained): %v", err)
+	}
 	collected := make(chan struct{})
 	go func() { defer close(collected); collector.Run(ctx) }()
 	front := gateway.New(upstream, ledger, archive)

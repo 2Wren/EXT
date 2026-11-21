@@ -173,3 +173,25 @@ details{border-top:1px solid var(--line);padding:11px 0}details:first-of-type{bo
   .panel { padding: 14px; }
   .panel.table { padding: 0; }
 }
+.demo-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin: 0 0 16px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 12px;
+}
+.demo-note strong { color: var(--ink); font-weight: 650; }
+
+/* CPA extension controls: reuse the host theme without a second settings UI. */
+.button-link{display:inline-flex;align-items:center;justify-content:center;min-height:36px;padding:8px 12px;border:1px solid var(--line);border-radius:var(--radius);background:var(--paper);color:var(--ink);font-weight:600;white-space:nowrap;text-decoration:none}
+.button-link:hover{background:var(--hover);border-color:var(--border)}
+.key-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.key-tools p{flex-basis:100%;font-size:12px}
+.advanced-settings{grid-column:1/-1}.advanced-settings[open]{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+.advanced-settings summary,.advanced-settings p{grid-column:1/-1}.advanced-settings p{font-size:12px;line-height:1.6}
+.source-info{font-size:12px}.source-info a{color:var(--ink)}

@@ -1,0 +1,50 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import {chromium} from '/work/node_modules/playwright/index.mjs';
+const env=Object.fromEntries(fs.readFileSync('/secrets/env','utf8').split('\n').filter(s=>s.includes('=')).map(s=>[s.slice(0,s.indexOf('=')),s.slice(s.indexOf('=')+1)]));
+const browser=await chromium.launch({args:['--no-sandbox']});
+try{
+ const page=await browser.newPage({viewport:{width:1440,height:975},locale:'zh-CN'});
+ const faults=[],writes=[];
+ page.on('pageerror',e=>faults.push(e.message));
+ page.on('request',r=>{if(r.url().includes('/cpa-ext/api/')&&r.method()!=='GET')writes.push(r.url());});
+ await page.goto('http://127.0.0.1:8482/management.html');
+ await page.locator('input[type=password]').fill(env.CPA_MANAGEMENT_KEY);
+ await page.locator('form button[type=submit]').click();
+ await page.locator('a[href*="/plugin-pages/cpa-ext/"]').click();
+ const frame=page.frameLocator('iframe[title="cpa-ext"]');
+ await frame.locator('input[type=password]').fill(env.ADMIN_PASSWORD);
+ await frame.getByRole('button',{name:'登录',exact:true}).click();
+ await frame.locator('#demo-toggle:enabled').waitFor();
+ assert.equal(await frame.getByRole('button',{name:'凭证状态',exact:true}).count(),0);
+ await frame.getByRole('button',{name:'Key 额度',exact:true}).click();
+ await frame.getByRole('button',{name:'从 CPA 同步',exact:true}).waitFor();
+ assert.equal(await frame.locator('input[name="secret"]').count(),0);
+ assert.ok((await frame.getByRole('link',{name:'在 CPA 管理 Key',exact:true}).getAttribute('href')).endsWith('#/config'));
+ await frame.getByRole('button',{name:'从 CPA 同步',exact:true}).click();
+ await frame.getByText('CPA Key 已同步。',{exact:true}).waitFor();
+ await frame.getByRole('button',{name:'模型价格',exact:true}).click();
+ await frame.getByText('gpt-4o',{exact:true}).first().waitFor();
+ assert.ok(await frame.getByText('内置参考',{exact:true}).count()>0);
+ await frame.getByRole('button',{name:'显示演示数据',exact:true}).click();
+ await frame.locator('#demo-note').waitFor({state:'visible'});
+ for(const nav of ['用量总览','Key 额度','消费流水','会话审计','模型价格']){
+  await frame.getByRole('button',{name:nav,exact:true}).click();
+  await frame.locator('#content').filter({hasNotText:'正在加载…'}).waitFor();
+  assert.equal(await frame.getByRole('button',{name:nav,exact:true}).getAttribute('aria-current'),'true');
+  if(nav==='Key 额度')assert.equal(await frame.getByRole('button',{name:'从 CPA 同步',exact:true}).isDisabled(),true);
+ }
+ await frame.getByRole('button',{name:'用量总览',exact:true}).click();
+ await frame.getByRole('img',{name:/请求数趋势/}).waitFor();
+ await page.screenshot({path:'/work/cpa-ext-synchronized.jpg',quality:70});
+ await page.setViewportSize({width:390,height:844});
+ assert.ok(await frame.locator('body').evaluate(b=>b.scrollWidth<=window.innerWidth+1));
+ await frame.getByRole('button',{name:'查看真实数据',exact:true}).click();
+ await frame.getByRole('link',{name:'CPA 认证文件 ↗',exact:true}).click();
+ await page.waitForURL(u=>u.hash.startsWith('#/auth-files')||u.hash.startsWith('#/oauth'),{timeout:10000});
+ await page.locator('a[href="#/auth-files"]').waitFor();
+ console.log('Official credential destination:',page.url());
+ assert.equal(faults.length,0,faults.join('\n'));
+ assert.ok(writes.every(u=>u.endsWith('/api/session')||u.endsWith('/api/keys/sync')),writes.join('\n'));
+ console.log('Live CPAMC: five tabs, actual key sync, reference prices, isolated demo, mobile layout and official auth-files navigation passed');
+}finally{await browser.close();}

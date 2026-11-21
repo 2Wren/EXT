@@ -25,6 +25,46 @@ func Open(dir string) (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
+	// Additive migration: preserve old price IDs referenced by historical turns.
+	for _, column := range []struct{ name, definition string }{
+		{"source", "TEXT NOT NULL DEFAULT 'manual'"},
+		{"source_url", "TEXT NOT NULL DEFAULT ''"},
+		{"source_date", "TEXT NOT NULL DEFAULT ''"},
+		{"is_reference", "INTEGER NOT NULL DEFAULT 0"},
+		{"note", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		rows, e := db.Query("PRAGMA table_info(prices)")
+		if e != nil {
+			db.Close()
+			return nil, e
+		}
+		exists := false
+		for rows.Next() {
+			var cid, notnull, pk int
+			var name, kind string
+			var def any
+			if e = rows.Scan(&cid, &name, &kind, &notnull, &def, &pk); e != nil {
+				rows.Close()
+				db.Close()
+				return nil, e
+			}
+			if name == column.name {
+				exists = true
+			}
+		}
+		e = rows.Err()
+		rows.Close()
+		if e != nil {
+			db.Close()
+			return nil, e
+		}
+		if !exists {
+			if _, e = db.Exec("ALTER TABLE prices ADD COLUMN " + column.name + " " + column.definition); e != nil {
+				db.Close()
+				return nil, e
+			}
+		}
+	}
 	return db, nil
 }
 

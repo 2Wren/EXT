@@ -1,5 +1,6 @@
 """Run after tests/e2e/test.py with the official CPA integration stack."""
 import base64
+import hashlib
 import json
 import time
 from urllib.request import Request, urlopen
@@ -13,7 +14,7 @@ def admin(path, data=None, method="GET"):
     headers={"Authorization":"Basic "+BASIC,"X-CPA-Ext-Admin":"1","Content-Type":"application/json"}
     return json.load(urlopen(Request(ADMIN+path,None if data is None else json.dumps(data).encode(),headers,method=method),timeout=5))
 
-admin("keys",{"secret":KEY,"name":"Fixture","daily":1_000_000_000,"total":1_000_000_000,"enabled":True},"PUT")
+admin("keys",{"id":hashlib.sha256(KEY.encode()).hexdigest(),"name":"Fixture","daily":1_000_000_000,"total":1_000_000_000,"enabled":True},"PUT")
 calls=[
     ("responses","/v1/responses",{"model":"fixture-chat","input":"bench","max_output_tokens":20,"stream":True}),
     ("messages","/v1/messages",{"model":"fixture-chat","messages":[{"role":"user","content":"bench"}],"max_tokens":20,"stream":True}),

@@ -16,14 +16,16 @@ import (
 )
 
 type Collector struct {
-	db      *sql.DB
-	cpa     cpa.Client
-	ledger  *billing.Ledger
-	mu      sync.Mutex
-	last    time.Time
-	issue   string
-	invalid int64
-	pending []json.RawMessage
+	keysMu     sync.Mutex
+	keysStatus KeySyncStatus
+	db         *sql.DB
+	cpa        cpa.Client
+	ledger     *billing.Ledger
+	mu         sync.Mutex
+	last       time.Time
+	issue      string
+	invalid    int64
+	pending    []json.RawMessage
 }
 
 func New(db *sql.DB, client cpa.Client, ledger *billing.Ledger) *Collector {
@@ -36,6 +38,9 @@ func (c *Collector) Status() map[string]any {
 }
 
 func (c *Collector) Run(ctx context.Context) {
+	keysDone := make(chan struct{})
+	go func() { defer close(keysDone); c.runKeys(ctx) }()
+	defer func() { <-keysDone }()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -173,7 +178,7 @@ func (c *Collector) settle(x candidate) error {
 	if err != nil {
 		return err
 	}
-	if model != p.BilledModel || input < 0 || output < 0 || cached < 0 || write < 0 || input > p.MaxInput || cached > p.MaxInput || write > p.MaxInput || output > p.MaxOutput {
+	if model != p.BilledModel || input < 0 || output < 0 || cached < 0 || write < 0 || (p.MaxInput > 0 && input+cached+write > p.MaxInput) || (p.MaxOutput > 0 && output > p.MaxOutput) {
 		_, err = c.db.Exec("UPDATE events SET blocked='billed model or token count outside configured price' WHERE id=?", id)
 		return err
 	}

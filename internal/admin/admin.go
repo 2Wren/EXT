@@ -13,7 +13,6 @@ import (
 
 	"cpa-ext/internal/audit"
 	"cpa-ext/internal/billing"
-	"cpa-ext/internal/cpa"
 	"cpa-ext/internal/store"
 	"cpa-ext/internal/usage"
 )
@@ -33,11 +32,14 @@ func (s Service) Handler(path string) http.Handler {
 	mux.HandleFunc("GET /api/overview", s.overview)
 	mux.HandleFunc("GET /api/series", s.series)
 	mux.HandleFunc("GET /api/keys", s.keys)
+	mux.HandleFunc("GET /api/keys/sync", s.keySyncStatus)
+	mux.HandleFunc("POST /api/keys/sync", s.syncKeys)
 	mux.HandleFunc("PUT /api/keys", s.updateKey)
 	mux.HandleFunc("GET /api/prices", func(w http.ResponseWriter, r *http.Request) {
-		s.query(w, "SELECT * FROM prices ORDER BY id DESC LIMIT 200")
+		s.query(w, `SELECT p.*, CASE WHEN p.id=(SELECT q.id FROM prices q WHERE q.protocol=p.protocol AND q.model=p.model ORDER BY q.is_reference ASC,q.id DESC LIMIT 1) THEN 1 ELSE 0 END active FROM prices p ORDER BY is_reference ASC,id DESC LIMIT 1000`)
 	})
 	mux.HandleFunc("POST /api/prices", s.addPrice)
+	mux.HandleFunc("GET /api/models", s.models)
 	mux.HandleFunc("GET /api/sessions", s.sessions)
 	mux.HandleFunc("GET /api/turns/{id}", s.turn)
 	mux.HandleFunc("GET /api/events", s.events)
@@ -143,17 +145,18 @@ func (s Service) series(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s Service) keys(w http.ResponseWriter, r *http.Request) {
-	rows, err := store.Query(s.DB, `SELECT k.*,
+	rows, err := store.Query(s.DB, `SELECT k.*,coalesce(c.masked_key,'') masked_key,coalesce(c.cpa_present,0) cpa_present,
  (SELECT coalesce(sum(amount),0) FROM spend WHERE key_id=k.id) spent,
  (SELECT coalesce(sum(amount),0) FROM spend WHERE key_id=k.id AND day=?) spent_today,
  (SELECT coalesce(sum(held),0) FROM leases WHERE key_id=k.id) held,
  (SELECT coalesce(sum(held),0) FROM leases WHERE key_id=k.id AND day=?) held_today
- FROM keys k ORDER BY name,id`, billing.Day(time.Now()), billing.Day(time.Now()))
+ FROM keys k LEFT JOIN cpa_keys c ON c.id=k.id ORDER BY k.name,k.id`, billing.Day(time.Now()), billing.Day(time.Now()))
 	if err != nil {
 		reply(w, 500, map[string]string{"error": "database query failed"})
 		return
 	}
 	for _, row := range rows {
+		row["cpa_present"] = row["cpa_present"].(int64) != 0
 		available, inFlight := s.Ledger.Snapshot(row["id"].(string))
 		row["admission_capacity"] = available
 		row["in_flight"] = inFlight
@@ -163,25 +166,42 @@ func (s Service) keys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s Service) updateKey(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		billing.Key
-		Secret string `json:"secret"`
-	}
+	var input billing.Key
 	if !decode(w, r, &input) {
 		return
 	}
-	if input.Secret != "" {
-		input.ID = cpa.KeyID(input.Secret)
+	if len(input.ID) != 64 {
+		reply(w, 400, map[string]string{"error": "invalid key id"})
+		return
 	}
 	if _, err := hex.DecodeString(input.ID); err != nil {
 		reply(w, 400, map[string]string{"error": "invalid key id"})
 		return
 	}
-	if err := s.Ledger.UpdateKey(input.Key); err != nil {
+	var count int
+	if err := s.DB.QueryRow("SELECT count(*) FROM keys WHERE id=?", input.ID).Scan(&count); err != nil {
+		reply(w, 500, map[string]string{"error": "database query failed"})
+		return
+	}
+	if count == 0 {
+		reply(w, 404, map[string]string{"error": "key not synchronized from CPA"})
+		return
+	}
+	if err := s.Ledger.UpdateKey(input); err != nil {
 		reply(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	reply(w, 200, input.Key)
+	reply(w, 200, input)
+}
+func (s Service) keySyncStatus(w http.ResponseWriter, r *http.Request) {
+	reply(w, 200, s.Collector.KeySyncStatus())
+}
+func (s Service) syncKeys(w http.ResponseWriter, r *http.Request) {
+	if err := s.Collector.SyncKeys(r.Context()); err != nil {
+		reply(w, 502, s.Collector.KeySyncStatus())
+		return
+	}
+	reply(w, 200, s.Collector.KeySyncStatus())
 }
 
 func (s Service) addPrice(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +209,10 @@ func (s Service) addPrice(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &p) {
 		return
 	}
+	p.IsReference = false
+	p.Source = "manual"
+	p.SourceDate = time.Now().In(billing.Shanghai).Format("2006-01-02")
+	p.SourceURL = ""
 	if err := s.Ledger.AddPrice(p); err != nil {
 		reply(w, 400, map[string]string{"error": err.Error()})
 		return

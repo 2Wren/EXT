@@ -17,7 +17,6 @@
           <button data-page="events" type="button">消费流水</button>
           <button data-page="sessions" type="button">会话审计</button>
           <button data-page="prices" type="button">模型价格</button>
-          <button data-page="credentials" type="button">凭证状态</button>
         </nav>
       </div>
       <div class="toolbar">
@@ -27,11 +26,14 @@
           <label class="range-picker" for="days"><span class="sr-only">时间范围</span>
             <select id="days"><option value="7">近 7 天</option><option value="14">近 14 天</option><option value="30" selected>近 30 天</option></select>
           </label>
+          <a id="cpa-auth-link" class="button-link" href="/management.html#/auth-files">CPA 认证文件 ↗</a>
           <button id="refresh" type="button">刷新</button>
+          <button id="demo-toggle" type="button" disabled>显示演示数据</button>
           <button id="logout" class="quiet" type="button">退出</button>
         </div>
       </div>
     </header>
+    <p id="demo-note" class="demo-note" role="status" hidden><strong>演示数据</strong><span>模拟用量和会话，仅供只读预览。</span></p>
     <div id="message" role="status"></div>
     <section id="content" aria-live="polite"></section>
   </main>

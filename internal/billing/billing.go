@@ -42,6 +42,11 @@ type Price struct {
 	MaxInput    int64  `json:"max_input"`
 	MaxOutput   int64  `json:"max_output"`
 	Verified    bool   `json:"verified"`
+	Source      string `json:"source"`
+	SourceURL   string `json:"source_url"`
+	SourceDate  string `json:"source_date"`
+	IsReference bool   `json:"is_reference"`
+	Note        string `json:"note"`
 }
 
 func (p Price) Bound(output int64) int64 {
@@ -55,8 +60,9 @@ type lease struct {
 }
 type keyState struct {
 	Key
-	room  int64
-	lease *lease
+	present bool
+	room    int64
+	lease   *lease
 }
 type Ledger struct {
 	db      *sql.DB
@@ -69,32 +75,36 @@ type Ledger struct {
 }
 
 func New(db *sql.DB) (*Ledger, error) {
+	if err := SeedReferences(db); err != nil {
+		return nil, err
+	}
 	l := &Ledger{db: db, keys: map[string]*keyState{}, prices: map[[2]string]Price{}, active: map[int64]*lease{}, now: time.Now}
-	rows, err := db.Query("SELECT id,name,enabled,daily,total FROM keys")
+	rows, err := db.Query("SELECT k.id,k.name,k.enabled,k.daily,k.total,coalesce(c.cpa_present,1) FROM keys k LEFT JOIN cpa_keys c ON c.id=k.id")
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var k Key
-		if err = rows.Scan(&k.ID, &k.Name, &k.Enabled, &k.Daily, &k.Total); err != nil {
+		var present bool
+		if err = rows.Scan(&k.ID, &k.Name, &k.Enabled, &k.Daily, &k.Total, &present); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		l.keys[k.ID] = &keyState{Key: k}
+		l.keys[k.ID] = &keyState{Key: k, present: present}
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
 		return nil, err
 	}
-	rows, err = db.Query("SELECT id,protocol,model,billed_model,input,output,cached,cache_write,max_input,max_output,verified FROM prices ORDER BY id")
+	rows, err = db.Query("SELECT id,protocol,model,billed_model,input,output,cached,cache_write,max_input,max_output,verified,source,source_url,source_date,is_reference,note FROM prices ORDER BY is_reference DESC,id")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var p Price
-		if err = rows.Scan(&p.ID, &p.Protocol, &p.Model, &p.BilledModel, &p.Input, &p.Output, &p.Cached, &p.CacheWrite, &p.MaxInput, &p.MaxOutput, &p.Verified); err != nil {
+		if err = rows.Scan(&p.ID, &p.Protocol, &p.Model, &p.BilledModel, &p.Input, &p.Output, &p.Cached, &p.CacheWrite, &p.MaxInput, &p.MaxOutput, &p.Verified, &p.Source, &p.SourceURL, &p.SourceDate, &p.IsReference, &p.Note); err != nil {
 			return nil, err
 		}
 		l.prices[[2]string{p.Protocol, p.Model}] = p
@@ -107,14 +117,14 @@ func (l *Ledger) SetHealthy(ok bool) { l.mu.Lock(); defer l.mu.Unlock(); l.healt
 func (l *Ledger) Enabled(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.keys[key] != nil && l.keys[key].Enabled
+	return l.keys[key] != nil && l.keys[key].Enabled && l.keys[key].present
 }
 
 func (l *Ledger) Admit(key, protocol, model string, output int64, strictShape bool, day string) (Grant, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	k := l.keys[key]
-	if k == nil || !k.Enabled {
+	if k == nil || !k.Enabled || !k.present {
 		return Grant{}, ErrDisabled
 	}
 	p := l.prices[[2]string{protocol, model}]
@@ -175,12 +185,19 @@ func (l *Ledger) UpdateKey(key Key) error {
 	if old != nil && old.lease != nil {
 		old.lease.free = 0
 	}
-	l.keys[key.ID] = &keyState{Key: key}
+	present := true
+	if old != nil {
+		present = old.present
+	}
+	l.keys[key.ID] = &keyState{Key: key, present: present}
 	return nil
 }
 
 func (l *Ledger) AddPrice(p Price) error {
-	if p.Protocol == "" || p.Model == "" || p.BilledModel == "" || p.MaxInput <= 0 || p.MaxInput > 10_000_000 || p.MaxOutput <= 0 || p.MaxOutput > 10_000_000 {
+	if len(p.Model) > 200 || len(p.BilledModel) > 200 || len(p.Note) > 1000 || len(p.SourceURL) > 500 || len(p.Source) > 120 || len(p.SourceDate) > 30 {
+		return errors.New("price metadata too long")
+	}
+	if p.Protocol == "" || p.Model == "" || p.BilledModel == "" || p.MaxInput < 0 || p.MaxInput > 10_000_000 || p.MaxOutput < 0 || p.MaxOutput > 10_000_000 {
 		return errors.New("model, billed model and valid token limits are required")
 	}
 	for _, v := range []int64{p.Input, p.Output, p.Cached, p.CacheWrite} {
@@ -188,13 +205,13 @@ func (l *Ledger) AddPrice(p Price) error {
 			return errors.New("invalid token price")
 		}
 	}
-	if p.Verified && p.Bound(p.MaxOutput) <= 0 {
+	if p.Verified && (p.MaxInput == 0 || p.MaxOutput == 0 || p.Bound(p.MaxOutput) <= 0) {
 		return errors.New("verified price must have a positive bound")
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	result, err := l.db.Exec("INSERT INTO prices(protocol,model,billed_model,input,output,cached,cache_write,max_input,max_output,verified) VALUES(?,?,?,?,?,?,?,?,?,?)",
-		p.Protocol, p.Model, p.BilledModel, p.Input, p.Output, p.Cached, p.CacheWrite, p.MaxInput, p.MaxOutput, p.Verified)
+	result, err := l.db.Exec("INSERT INTO prices(protocol,model,billed_model,input,output,cached,cache_write,max_input,max_output,verified,source,source_url,source_date,is_reference,note) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+		p.Protocol, p.Model, p.BilledModel, p.Input, p.Output, p.Cached, p.CacheWrite, p.MaxInput, p.MaxOutput, p.Verified, p.Source, p.SourceURL, p.SourceDate, p.IsReference, p.Note)
 	if err != nil {
 		return err
 	}
@@ -216,7 +233,7 @@ func (l *Ledger) Refresh() error {
 		}
 	}
 	for _, k := range l.keys {
-		if !k.Enabled || (k.Daily == 0 && k.Total == 0) {
+		if !k.Enabled || !k.present || (k.Daily == 0 && k.Total == 0) {
 			continue
 		}
 		if k.lease != nil && k.lease.day != day {
@@ -327,7 +344,7 @@ func (l *Ledger) Settle(turn, event, key, day string, grant Grant, amount int64,
 	if grant.LeaseID != 0 {
 		a = l.active[grant.LeaseID]
 		k := l.keys[key]
-		reusable = a != nil && k != nil && k.lease == a && k.Enabled && a.day == Day(l.now())
+		reusable = a != nil && k != nil && k.lease == a && k.Enabled && k.present && a.day == Day(l.now())
 		release := grant.Amount
 		if reusable {
 			release = amount
