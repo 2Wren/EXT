@@ -39,3 +39,11 @@ Create and delete client keys and manage upstream credential files in official C
 ## Compact interface
 
 The normal interface contains only Overview, Key quotas, Spend ledger and Session audit. Key synchronization runs in the background and the quota list refreshes quietly while no editor is open. Sync status cards and duplicate policy/status columns are not shown. Reference prices and versioned manual overrides remain internal billing data; the standalone price configuration tab is removed. Existing admin pricing APIs remain available for advanced configuration.
+
+## Public domain
+
+Production domain: https://cpa.meetran.com. The root redirects to official CPAMC at /management.html; the extension is available in the CPAMC plugin sidebar. OpenAI-compatible clients use https://cpa.meetran.com/v1. No SSH tunnel is required.
+
+Caddy terminates HTTPS on loopback 8443 behind the existing sing-box Reality fallback on public 443. Caddy owns automatic Let’s Encrypt certificate renewal. Management, extension resources, and OAuth callbacks are routed to the panel listener on 8482; all other paths are routed to the inference gateway on 8480 so clients cannot bypass quota and audit. Public sessions receive Secure cookies and HSTS. Existing CPA management and extension administrator credentials still apply.
+
+The Caddy configuration is /etc/caddy/Caddyfile; the pre-domain backup is /etc/caddy/Caddyfile.before-cpa-20261121. No sing-box, CPA, Magpie, or firewall changes were needed.
