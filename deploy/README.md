@@ -35,3 +35,7 @@ The isolated test project also supports `python3 tests/e2e/protocols.py` and `py
 ## CPA ownership
 
 Create and delete client keys and manage upstream credential files in official CPAMC. cpa-ext only owns quota policies, reference pricing, historical usage, spend, and conversation audit. The duplicate credential-state tab has been removed; its shortcut opens the official authentication-files page. The demonstration switch renders isolated browser-only sample data, never ledger entries.
+
+## Compact interface
+
+The normal interface contains only Overview, Key quotas, Spend ledger and Session audit. Key synchronization runs in the background and the quota list refreshes quietly while no editor is open. Sync status cards and duplicate policy/status columns are not shown. Reference prices and versioned manual overrides remain internal billing data; the standalone price configuration tab is removed. Existing admin pricing APIs remain available for advanced configuration.
