@@ -21,3 +21,11 @@ observability:
     redis-usage-queue-retention-seconds: 3600
 oauth:
   auth-dir: /root/.cli-proxy-api
+
+plugins:
+  enabled: true
+  dir: /plugins
+  configs:
+    cpa-ext:
+      enabled: true
+      priority: 1

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 cpa-ext</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body class="login-page">
+  <main>
+    <section class="login-card">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span>cpa-ext</div>
+      <h1>登录管理后台</h1>
+      <form id="login-form">
+        <label>管理密码<input name="password" type="password" autocomplete="current-password" required></label>
+        <p id="login-error" class="error" role="alert"></p>
+        <button class="primary" type="submit">登录</button>
+      </form>
+    </section>
+  </main>
+  <script src="app.js" type="module"></script>
+</body>
+</html>

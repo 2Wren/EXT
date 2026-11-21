@@ -9,8 +9,7 @@ services:
       - ./state/cpa-config:/config
       - ./state/cpa-auth:/root/.cli-proxy-api
       - ./state/panel:/panel
-    ports:
-      - "127.0.0.1:8482:8317"
+      - ./state/cpa-plugins:/plugins
   cpa-ext:
     image: cpa-ext:dev
     build:
@@ -27,6 +26,7 @@ services:
       STATE_DIR: /data
       GATEWAY_ADDR: 0.0.0.0:8480
       ADMIN_ADDR: 0.0.0.0:8481
+      PANEL_ADDR: 0.0.0.0:8482
       AUDIT_KEEP_DAYS: ${AUDIT_KEEP_DAYS:-14}
       AUDIT_MAX_GIB: ${AUDIT_MAX_GIB:-20}
       DISK_MIN_GIB: ${DISK_MIN_GIB:-10}
@@ -35,5 +35,6 @@ services:
     ports:
       - "127.0.0.1:8480:8480"
       - "127.0.0.1:8481:8481"
+      - "127.0.0.1:8482:8482"
     depends_on:
       - cpa

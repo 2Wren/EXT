@@ -101,7 +101,10 @@ func run() error {
 	}
 	servers := []*http.Server{
 		serve(env("GATEWAY_ADDR", "127.0.0.1:8480"), front),
-		serve(env("ADMIN_ADDR", "127.0.0.1:8481"), adm.Handler()),
+		serve(env("ADMIN_ADDR", "127.0.0.1:8481"), adm.Handler("")),
+	}
+	if addr := os.Getenv("PANEL_ADDR"); addr != "" {
+		servers = append(servers, serve(addr, admin.Panel(upstream, adm.Handler(admin.PanelPath))))
 	}
 	serverErrors := make(chan error, len(servers))
 	for _, srv := range servers {

@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 umask 077
-mkdir -p state/{ext,cpa-auth,cpa-config,panel}
+mkdir -p state/{ext,cpa-auth,cpa-config,cpa-plugins,panel}
 if [[ ! -e .env ]]; then
   {
     printf 'CPA_MANAGEMENT_KEY=%s\n' "$(openssl rand -hex 32)"
@@ -24,3 +24,4 @@ if [[ ! -f state/panel/management.html ]]; then
   printf '%s  %s\n' 6d4e005420ee18899ef115a4e68d61f700ddb372844f2317546a0d0aa4553dfc "$tmp" | sha256sum -c -
   mv "$tmp" state/panel/management.html
 fi
+bash deploy/build-panel-plugin.sh

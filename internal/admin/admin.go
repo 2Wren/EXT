@@ -2,7 +2,6 @@ package admin
 
 import (
 	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -28,10 +27,11 @@ type Service struct {
 	Assets    fs.FS
 }
 
-func (s Service) Handler() http.Handler {
+func (s Service) Handler(path string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) { reply(w, 200, s.Collector.Status()) })
 	mux.HandleFunc("GET /api/overview", s.overview)
+	mux.HandleFunc("GET /api/series", s.series)
 	mux.HandleFunc("GET /api/keys", s.keys)
 	mux.HandleFunc("PUT /api/keys", s.updateKey)
 	mux.HandleFunc("GET /api/prices", func(w http.ResponseWriter, r *http.Request) {
@@ -50,20 +50,47 @@ func (s Service) Handler() http.Handler {
 		reply(w, 200, credentials)
 	})
 	mux.Handle("GET /", http.FileServerFS(s.Assets))
-	digest := sha256.Sum256([]byte(s.Password))
+	sessions := sessions{digest: sha256.Sum256([]byte(s.Password)), path: path}
+	static := http.FileServerFS(s.Assets)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
-		name, password, ok := r.BasicAuth()
-		sent := sha256.Sum256([]byte(password))
-		if !ok || name != "admin" || subtle.ConstantTimeCompare(sent[:], digest[:]) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="cpa-ext", charset="UTF-8"`)
-			http.Error(w, "Authentication required", 401)
+		frames := "'none'"
+		if path == PanelPath {
+			frames = "'self'"
+		}
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; frame-ancestors "+frames+"; base-uri 'none'; form-action 'self'")
+		if (r.Method == "PUT" || r.Method == "POST") && r.Header.Get("X-CPA-Ext-Admin") != "1" {
+			reply(w, 403, map[string]string{"error": "需要后台请求标识"})
 			return
 		}
-		if (r.Method == "PUT" || r.Method == "POST") && r.Header.Get("X-CPA-Ext-Admin") != "1" {
-			reply(w, 403, map[string]string{"error": "admin request header required"})
+		if r.Method == "GET" && (r.URL.Path == "/app.js" || r.URL.Path == "/app.css") {
+			static.ServeHTTP(w, r)
+			return
+		}
+		if r.Method == "POST" && r.URL.Path == "/api/session" {
+			sessions.login(w, r)
+			return
+		}
+		if r.Method == "POST" && r.URL.Path == "/api/logout" {
+			sessions.logout(w, r)
+			return
+		}
+		if !sessions.authorized(r) {
+			if r.Method == "GET" && r.URL.Path == "/" {
+				body, err := fs.ReadFile(s.Assets, "login.html")
+				if err != nil {
+					http.Error(w, "Login unavailable", 500)
+					return
+				}
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				_, _ = w.Write(body)
+				return
+			}
+			if r.Header.Get("Authorization") != "" {
+				w.Header().Set("WWW-Authenticate", `Basic realm="cpa-ext", charset="UTF-8"`)
+			}
+			reply(w, 401, map[string]string{"error": "登录已失效"})
 			return
 		}
 		mux.ServeHTTP(w, r)
@@ -86,13 +113,33 @@ func (s Service) query(w http.ResponseWriter, stmt string, args ...any) {
 }
 
 func (s Service) overview(w http.ResponseWriter, r *http.Request) {
-	since := time.Now().AddDate(0, 0, -30).UnixMilli()
+	since := periodStart(r).UnixMilli()
 	s.query(w, `SELECT model,key_id,count(*) requests,sum(input) input,sum(output) output,sum(cached) cached,
  sum(cache_write) cache_write, sum(total) total, sum(cost) cost, sum(failed) failures,
  round(avg(latency),1) latency, round(avg(CASE WHEN ttft>0 THEN ttft END),1) ttft,
  round(CASE WHEN sum(input+cached+cache_write)>0 THEN 100.0*sum(cached)/sum(input+cached+cache_write) END,2) cache_pct,
  sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) pending
  FROM events WHERE happened>=? GROUP BY model,key_id ORDER BY requests DESC LIMIT 500`, since)
+}
+
+func periodStart(r *http.Request) time.Time {
+	days := 30
+	switch r.URL.Query().Get("days") {
+	case "7":
+		days = 7
+	case "14":
+		days = 14
+	}
+	now := time.Now().In(billing.Shanghai)
+	year, month, day := now.Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, billing.Shanghai).AddDate(0, 0, 1-days)
+}
+
+func (s Service) series(w http.ResponseWriter, r *http.Request) {
+	s.query(w, `SELECT date(happened/1000,'unixepoch','+8 hours') day,count(*) requests,sum(total) tokens,sum(cost) cost,
+ sum(input+cached+cache_write) input_tokens,sum(cached) cached,
+ sum(failed) failures,sum(CASE WHEN cost IS NULL THEN 1 ELSE 0 END) pending
+ FROM events WHERE happened>=? GROUP BY day ORDER BY day`, periodStart(r).UnixMilli())
 }
 
 func (s Service) keys(w http.ResponseWriter, r *http.Request) {

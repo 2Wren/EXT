@@ -6,9 +6,11 @@ The checkout lives at `/home/ubuntu/cpa-ext`. Oracle uses Linux ARM64. The Docke
 | --- | --- |
 | 8480 | Client API gateway |
 | 8481 | cpa-ext admin |
-| 8482 | Official CPA and CPAMC |
+| 8482 | Official CPAMC, CPA management API, and the embedded cpa-ext page |
 
-Create an SSH tunnel using the existing Oracle host and key. Forward ports 8480, 8481 and 8482. Open `http://127.0.0.1:8481/` to administer the extension or `http://127.0.0.1:8482/management.html` for CPAMC. Use username `admin` with `ADMIN_PASSWORD` from the server's private `.env`. CPAMC uses `CPA_MANAGEMENT_KEY` from the same file.
+Create an SSH tunnel using the existing Oracle host and key. Forward ports 8480, 8481 and 8482. Open `http://127.0.0.1:8482/management.html` and sign in with `CPA_MANAGEMENT_KEY` from the server's private `.env`. Select **cpa-ext** in the CPAMC sidebar, then enter `ADMIN_PASSWORD` once in the embedded page. The standalone extension UI is available on `http://127.0.0.1:8481/`. API automation can use HTTP Basic with username `admin` and `ADMIN_PASSWORD`.
+
+The sidebar entry is a native CPA resource plugin, built from `plugins/cpamc/plugin.c` by `deploy/build-panel-plugin.sh`. It directs the official CPAMC frame to the same-origin `/cpa-ext/` path. The listener on 8482 serves the management surface and the embedded UI. Use 8480 for inference. The nested dashboard login is scoped to `/cpa-ext/`.
 
 ## Configure
 
