@@ -1,0 +1,5 @@
+.git
+state
+.env
+deploy/cpa.yaml
+deploy/test-state

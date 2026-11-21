@@ -1,0 +1,29 @@
+config-version: 8
+server:
+  port: 8317
+  response-compression:
+    enabled: false
+management:
+  allow-remote: true
+  secret-key: fixture-management-secret-local-only
+  disable-control-panel: true
+access:
+  api-keys:
+    - fixture-client-secret-local-only
+routing:
+  retry:
+    request-retry: 0
+    max-retry-credentials: 1
+api-keys:
+  openai-compatibility:
+    - name: fixture
+      base-url: http://mock:8000/v1
+      keys:
+        - api-key: fake-upstream-key
+      models:
+        - name: fixture-chat
+          alias: fixture-chat
+observability:
+  usage:
+    usage-statistics-enabled: true
+    redis-usage-queue-retention-seconds: 3600

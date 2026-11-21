@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cpa-ext 管理后台</title>
+<link rel="stylesheet" href="/app.css">
+<body>
+<aside>
+  <div class="brand"><span></span>cpa-ext</div>
+  <nav aria-label="后台">
+    <button data-page="overview">用量总览</button>
+    <button data-page="keys">Key 额度</button>
+    <button data-page="events">消费流水</button>
+    <button data-page="sessions">会话审计</button>
+    <button data-page="prices">模型价格</button>
+    <button data-page="credentials">凭证池</button>
+  </nav>
+  <p id="health" role="status"></p>
+</aside>
+<main>
+  <header><div><small>CLIProxyAPI 管理后台</small><h1 id="title"></h1></div><button id="refresh">刷新</button></header>
+  <div id="message" role="status"></div>
+  <section id="content" aria-live="polite"></section>
+</main>
+<script src="/app.js" type="module"></script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+/state/
+/.env
+/deploy/cpa.yaml
+/deploy/test-state/
+/cpa-ext
+*.sqlite*

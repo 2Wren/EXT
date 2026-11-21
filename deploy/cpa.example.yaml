@@ -1,0 +1,23 @@
+config-version: 8
+server:
+  port: 8317
+  max-request-body-bytes: 1048576
+  response-compression:
+    enabled: false
+management:
+  allow-remote: true
+  secret-key: __CPA_MANAGEMENT_KEY__
+  disable-control-panel: false
+  disable-auto-update-panel: true
+access:
+  api-keys: []
+routing:
+  retry:
+    request-retry: 0
+    max-retry-credentials: 1
+observability:
+  usage:
+    usage-statistics-enabled: true
+    redis-usage-queue-retention-seconds: 3600
+oauth:
+  auth-dir: /root/.cli-proxy-api

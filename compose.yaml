@@ -1,0 +1,39 @@
+services:
+  cpa:
+    image: eceasy/cli-proxy-api:v8.0.80@sha256:0695ae8721d623ed31179369fc7127d469f10a14a37a49c366e82a16383662f8
+    restart: unless-stopped
+    command: ["./CLIProxyAPI", "-config", "/config/config.yaml"]
+    environment:
+      MANAGEMENT_STATIC_PATH: /panel
+    volumes:
+      - ./state/cpa-config:/config
+      - ./state/cpa-auth:/root/.cli-proxy-api
+      - ./state/panel:/panel
+    ports:
+      - "127.0.0.1:8482:8317"
+  cpa-ext:
+    image: cpa-ext:dev
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    stop_grace_period: 15s
+    user: "${CPA_EXT_UID:-1000}:${CPA_EXT_GID:-1000}"
+    read_only: true
+    environment:
+      CPA_BASE_URL: http://cpa:8317
+      CPA_MANAGEMENT_KEY: ${CPA_MANAGEMENT_KEY:?Run deploy/init.sh first}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Run deploy/init.sh first}
+      STATE_DIR: /data
+      GATEWAY_ADDR: 0.0.0.0:8480
+      ADMIN_ADDR: 0.0.0.0:8481
+      AUDIT_KEEP_DAYS: ${AUDIT_KEEP_DAYS:-14}
+      AUDIT_MAX_GIB: ${AUDIT_MAX_GIB:-20}
+      DISK_MIN_GIB: ${DISK_MIN_GIB:-10}
+    volumes:
+      - ./state/ext:/data
+    ports:
+      - "127.0.0.1:8480:8480"
+      - "127.0.0.1:8481:8481"
+    depends_on:
+      - cpa

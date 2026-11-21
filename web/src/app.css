@@ -1,0 +1,26 @@
+*{box-sizing:border-box}
+:root{font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;color:#1b2724;background:#f4f6f3;font-size:14px;--line:#dce3dd;--accent:#235c49}
+body{margin:0;display:grid;grid-template-columns:210px minmax(0,1fr);min-height:100vh}
+aside{background:#152a23;color:#e9f0eb;padding:28px 18px;display:flex;flex-direction:column;gap:24px}
+.brand{font-size:23px;font-weight:740;padding:0 10px;letter-spacing:-.05em;display:flex;align-items:center;gap:10px}
+.brand span{width:12px;height:12px;border-radius:4px;background:#8bd9b5}
+nav{display:grid;gap:3px}nav button{background:transparent;color:#c9d8ce;border-color:transparent;text-align:left}
+nav button[aria-current=true]{background:#294a3d;color:white}nav button:hover{background:#254437}
+#health{margin-top:auto;font-size:12px;color:#b5d5c4;padding:10px}
+main{width:min(1500px,100%);padding:38px 36px}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:24px}
+header small{color:#60796f}h1{font-size:31px;letter-spacing:-.04em;margin:4px 0 0}h2{font-size:16px;margin-top:0}
+button,input,select{font:inherit;border:1px solid var(--line);border-radius:7px;padding:8px 11px;background:#fff;color:inherit}
+button{cursor:pointer}.primary{background:var(--accent);color:white;border-color:var(--accent)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #2d795d;outline-offset:2px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:0 0 18px}
+.card,.panel{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}
+.card strong{display:block;font-size:24px;margin-top:7px;font-variant-numeric:tabular-nums}.card small{color:#546960}
+.panel{margin:0 0 14px}.table{overflow:auto;padding:0}table{width:100%;border-collapse:collapse;white-space:nowrap;text-align:left}
+th,td{padding:12px 14px;border-bottom:1px solid var(--line)}th{color:#466355;font-size:12px;background:#f8faf8}
+tr:last-child td{border-bottom:0}td button{padding:4px 8px}
+form,.toolbar{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin:0 0 12px}
+label{display:grid;gap:4px;color:#344f42}label:has(input[type=checkbox]){display:flex;align-items:center}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f7f4;padding:14px;border-radius:8px;max-height:55vh;overflow:auto}
+details{margin:12px 0}summary{cursor:pointer}.error{color:#9d261e}.muted,#message{color:#53695f}.error.strong{margin-bottom:12px}
+@media(max-width:750px){body{display:block}aside{padding:14px;gap:9px}nav{display:flex;overflow:auto}nav button{white-space:nowrap}#health{margin:0;padding:0 8px}main{padding:22px 15px}}
