@@ -1,0 +1,28 @@
+services:
+  cpa-ext:
+    image: cpa-ext:attach
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    stop_grace_period: 150s
+    network_mode: host
+    user: "${CPA_EXT_UID:?Set the host UID in .env.attach}:${CPA_EXT_GID:?Set the host GID in .env.attach}"
+    read_only: true
+    environment:
+      CPA_BASE_URL: ${CPA_BASE_URL:-http://127.0.0.1:8317}
+      CPA_MANAGEMENT_KEY: ${CPA_MANAGEMENT_KEY:?Set the existing CPA management key in .env.attach}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set an EXT admin password in .env.attach}
+      STATE_DIR: /data
+      GATEWAY_ADDR: "127.0.0.1:${CPA_EXT_GATEWAY_PORT:-8480}"
+      ADMIN_ADDR: "127.0.0.1:${CPA_EXT_ADMIN_PORT:-8481}"
+      PANEL_ADDR: ${CPA_EXT_PANEL_ADDR:-}
+      AUDIT_KEEP_DAYS: ${AUDIT_KEEP_DAYS:-14}
+      AUDIT_MAX_GIB: ${AUDIT_MAX_GIB:-20}
+      DISK_MIN_GIB: ${DISK_MIN_GIB:-10}
+    volumes:
+      - type: bind
+        source: ${CPA_EXT_STATE_DIR:-./state/attach}
+        target: /data
+        bind:
+          create_host_path: false

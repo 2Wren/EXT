@@ -1,5 +1,6 @@
 /state/
 /.env
+/.env.attach
 /deploy/cpa.yaml
 /deploy/test-state/
 /cpa-ext
