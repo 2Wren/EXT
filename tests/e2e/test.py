@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import gzip
 import concurrent.futures
 import json
 import time
@@ -33,6 +34,8 @@ assert KEY not in json.dumps(admin("keys")), "client secret leaked"
 assert next(x for x in admin("keys") if x["id"]==hashlib.sha256(KEY.encode()).hexdigest())["cpa_present"]
 admin("prices",{"protocol":"chat","model":"fixture-chat","billed_model":"fixture-chat","input":1000,"output":2000,"cached":500,"cache_write":1000,"max_input":1000,"max_output":20,"verified":True},"POST")
 key = admin("keys",{"id":hashlib.sha256(KEY.encode()).hexdigest(),"weekly":0,"total":0},"PUT")
+assert admin("keys",{"id":key["id"],"weekly":0,"total":0,"week_reset":"0 18:00"},"PUT")["week_reset"]=="0 18:00"
+assert next(x for x in admin("keys") if x["id"]==key["id"])["week_start"]
 
 def stream():
     data={"model":"fixture-chat","stream":True,"stream_options":{"include_usage":True},"max_tokens":20,"messages":[{"role":"user","content":"hello"}]}
@@ -117,3 +120,27 @@ assert call("unlisted")[0]==403
 admin("keys",policy,"PUT")
 assert admin("keys")[0]["models"]==[] and call()[0]==200
 print("official CPA v8: SSE immediate forwarding, weekly and total limits, settlement, transcript, session, paged request list and per-key model restriction passed")
+
+# The stored JSON can exceed the inline preview budget even when the request
+# itself is under 32 MiB, because the archive encodes the request as base64.
+large_prompt = "x" * (25 * 1024 * 1024)
+payload = json.dumps({"model":"fixture-chat","messages":[{"role":"user","content":large_prompt}]}).encode()
+req = Request(GATEWAY+"/v1/chat/completions",payload,{"Authorization":"Bearer "+KEY,"Content-Type":"application/json"})
+with urlopen(req,timeout=30) as response:
+    assert response.status==200 and json.load(response)["choices"]
+    large_turn = response.headers["X-CPA-Ext-Turn"]
+large = wait(lambda: admin("turns/"+large_turn), "large turn was not archived")
+assert large["body"] is None and large["body_status"]=="too_large",large
+archive_url = ADMIN+"/api/turns/"+large_turn+"/archive"
+try:
+    urlopen(archive_url,timeout=5)
+except HTTPError as error:
+    assert error.code==401,error.code
+else:
+    raise AssertionError("archive download did not require authentication")
+with urlopen(Request(archive_url,headers={"Authorization":"Basic "+BASIC}),timeout=10) as response:
+    assert response.headers.get_content_type()=="application/gzip"
+    assert response.headers["Content-Disposition"].startswith("attachment;")
+    archive=json.loads(gzip.decompress(response.read()))
+assert json.loads(base64.b64decode(archive["request_raw"]))["messages"][0]["content"]==large_prompt
+print("Large request forwarded intact; summary and authenticated archive download passed")

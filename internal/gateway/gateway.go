@@ -219,14 +219,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Failure(w, 415, "unsupported_content_encoding", "send an uncompressed request")
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, audit.RequestCap))
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		var maxErr *http.MaxBytesError
-		status := http.StatusBadRequest
-		if errors.As(err, &maxErr) {
-			status = http.StatusRequestEntityTooLarge
-		}
-		Failure(w, status, "request_body_unreadable", "cannot read the request body")
+		Failure(w, http.StatusBadRequest, "request_body_unreadable", "cannot read the request body")
 		return
 	}
 	t, err := g.start(r, key, protocol, pathModel, started, body)

@@ -113,6 +113,54 @@ func TestKeySyncFirstStartAndFailedSnapshot(t *testing.T) {
 	}
 }
 
+// Keep the last-success marker current without rewriting unchanged keys.
+func TestUnchangedKeySyncWrites(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ledger, err := New(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []SyncedKey
+	for _, c := range []string{"a", "b", "c", "d", "e"} {
+		keys = append(keys, SyncedKey{strings.Repeat(c, 64), "mask-" + c})
+	}
+	syncKeys := func(keys []SyncedKey) {
+		t.Helper()
+		if err := ledger.SyncKeys(keys); err != nil {
+			t.Fatal(err)
+		}
+	}
+	changes := func() int {
+		t.Helper()
+		var n int
+		if err := db.QueryRow("SELECT total_changes()").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	syncKeys(keys)
+	syncKeys(keys[:4])
+	before := changes()
+	syncKeys(keys[:4])
+	if n := changes() - before; n != 1 {
+		t.Fatalf("unchanged snapshot changed %d rows, want only the sync marker", n)
+	}
+	before = changes()
+	syncKeys([]SyncedKey{keys[1], keys[0], keys[2], keys[3]})
+	if n := changes() - before; n != 3 {
+		t.Fatalf("swap changed %d rows, want two positions and the sync marker", n)
+	}
+	before = changes()
+	named, err := ledger.NameKeys(map[string]string{keys[0].ID: "renamed", keys[1].ID: keys[1].MaskedKey})
+	if err != nil || len(named) != 2 || changes()-before != 1 {
+		t.Fatalf("expected two acknowledged names and one write: %v, %v", named, err)
+	}
+}
+
 func TestAllowsModel(t *testing.T) {
 	for _, c := range []struct {
 		allowed []string

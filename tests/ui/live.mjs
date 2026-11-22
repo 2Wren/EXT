@@ -1,24 +1,26 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {chromium} from '/work/node_modules/playwright/index.mjs';
-const env=Object.fromEntries(fs.readFileSync('/secrets/env','utf8').split('\n').filter(s=>s.includes('=')).map(s=>[s.slice(0,s.indexOf('=')),s.slice(s.indexOf('=')+1)]));
+const base=process.env.CPA_EXT_UI_BASE||'http://127.0.0.1:8482';
+const env=Object.fromEntries(fs.readFileSync(process.env.CPA_EXT_UI_ENV||'/secrets/env','utf8').split('\n').filter(s=>s.includes('=')).map(s=>[s.slice(0,s.indexOf('=')),s.slice(s.indexOf('=')+1)]));
 const browser=await chromium.launch({args:['--no-sandbox']});
 try{
  const page=await browser.newPage({viewport:{width:1440,height:975},locale:'zh-CN'});
  const faults=[],writes=[];
  page.on('pageerror',e=>faults.push(e.message));
  page.on('request',r=>{if(r.url().includes('/cpa-ext/api/')&&r.method()!=='GET')writes.push(r.url());});
- await page.goto('http://127.0.0.1:8482/management.html');
+ await page.goto(base+'/management.html');
  await page.locator('input[type=password]').fill(env.CPA_MANAGEMENT_KEY);
  await page.locator('form button[type=submit]').click();
- const base='http://127.0.0.1:8482',stranger={['0'.repeat(64)]:'ui-check'};
- // Write the name with CPAMC's own storage code, taken from the served bundle.
- const bundle=await (await page.request.get(base+'/management.html')).text();
- const tail='removeItem(e){localStorage.removeItem(e)}}',from=bundle.indexOf('hl=`enc::v2::`'),to=bundle.indexOf(tail,from);
- assert.ok(from>0&&to>from,'CPAMC storage code not found');
- await page.evaluate(`(()=>{var ${bundle.slice(from,to+tail.length)};Ol.setItem(${JSON.stringify('api-key-names:v1:'+base)},${JSON.stringify(stranger)})})()`);
- assert.match(await page.evaluate(slot=>localStorage.getItem(slot),'api-key-names:v1:'+base),/^enc::v2::/);
- const naming=page.waitForResponse(r=>r.url().endsWith('/cpa-ext/api/keys/names'));
+ const stranger={['0'.repeat(64)]:'ui-check'};
+ // Simulate a saved CPAMC display name for an ID outside this ledger.
+ await page.evaluate(({base,names})=>{
+  const pad=new TextEncoder().encode('cli-proxy-api-webui::secure-storage|'+location.host);
+  const bytes=new TextEncoder().encode(JSON.stringify(names));
+  const encoded=btoa(Array.from(bytes,(byte,i)=>String.fromCharCode(byte^pad[i%pad.length])).join(''));
+  localStorage.setItem('api-key-names:v1:'+base,'enc::v2::'+encoded);
+ },{base,names:stranger});
+ const naming=page.waitForResponse(r=>r.url().endsWith('/cpa-ext/api/keys/names')&&r.status()===200);
  await page.locator('a[href*="/plugin-pages/cpa-ext/"]').click();
  const frame=page.frameLocator('iframe[title="EXT"]');
  await frame.locator('input[type=password]').fill(env.ADMIN_PASSWORD);
@@ -36,10 +38,12 @@ try{
  assert.equal(await frame.getByRole('button',{name:'从 CPA 同步',exact:true}).count(),0);
  assert.equal(await frame.getByRole('link',{name:'在 CPA 管理 Key',exact:true}).count(),0);
  assert.equal(await frame.getByRole('button',{name:'模型价格',exact:true}).count(),0);
- assert.equal(await frame.locator('thead th').count(),7);
+ for(const name of ['密钥','周限额','总限额','周重置','可调用模型','本周消费','累计消费','操作']){
+  await frame.getByRole('columnheader',{name,exact:true}).waitFor();
+ }
  assert.equal(await frame.locator('#key-editor').isVisible(),false);
  assert.equal(await frame.locator('input[type=password]').count(),0);
- const prices=await page.request.get('http://127.0.0.1:8482/cpa-ext/api/prices');
+ const prices=await page.request.get(base+'/cpa-ext/api/prices');
  assert.equal(prices.status(),200);assert.ok((await prices.json()).some(p=>p.is_reference));
  await page.waitForRequest(r=>r.url().endsWith('/cpa-ext/api/keys'),{timeout:12000});
  for(const nav of ['用量总览','密钥限制','请求明细','会话审计']){
@@ -91,7 +95,11 @@ try{
  assert.equal(await counted('条'),today);
  await period.selectOption('custom');
  await settled();
+ await frame.getByLabel('开始时间（北京时间）').fill('2020-01-02T00:00');
  await frame.getByLabel('结束时间（北京时间）').fill('2020-01-01T00:00');
+ await frame.getByRole('button',{name:'查询',exact:true}).click();
+ await frame.getByText('结束时间必须晚于开始时间。').waitFor();
+ await frame.getByLabel('开始时间（北京时间）').fill('2019-12-31T00:00');
  await frame.getByRole('button',{name:'查询',exact:true}).click();
  await frame.getByText('共 0 条').waitFor();
  await period.selectOption('all');
@@ -101,15 +109,23 @@ try{
  await frame.getByLabel(/可调用模型/).waitFor();
  await frame.getByLabel('周限额 USD').waitFor();
  await frame.getByLabel('总限额 USD').waitFor();
- assert.equal(await frame.locator('#key-editor input').count(),3);
+ const editor=frame.locator('#key-editor');
+ const weekday=editor.locator('label').filter({hasText:'周重置 · 星期（北京时间）'}).locator('select');
+ const weektime=editor.locator('label').filter({hasText:'周重置 · 时刻'}).locator('input');
+ await weekday.waitFor();
+ assert.equal(await weekday.locator('option').count(),7);
+ assert.equal(await weektime.getAttribute('type'),'time');
+ await weekday.selectOption('0');
+ await weektime.fill('18:30');
+ assert.equal(await weekday.inputValue(),'0');
+ assert.equal(await weektime.inputValue(),'18:30');
  assert.equal(await frame.locator('#key-editor input[type=checkbox]').count(),0);
  assert.equal(await frame.getByText(/显示名称|扩展网关|日额度/).count(),0);
- assert.deepEqual(await frame.locator('thead th').allTextContents(),['密钥','周限额','总限额','可调用模型','本周消费','累计消费','操作']);
  await frame.locator('.chips button').first().waitFor();
  await frame.getByRole('button',{name:'关闭',exact:true}).click();
  await frame.getByRole('button',{name:'用量总览',exact:true}).click();
  await frame.getByRole('img',{name:/请求数趋势/}).waitFor();
- await page.screenshot({path:'/work/cpa-ext-synchronized.jpg',quality:70});
+ if(process.env.CPA_EXT_UI_SCREENSHOT)await page.screenshot({path:process.env.CPA_EXT_UI_SCREENSHOT,quality:70});
  await page.setViewportSize({width:390,height:844});
  assert.ok(await frame.locator('body').evaluate(b=>b.scrollWidth<=window.innerWidth+1));
  assert.equal(faults.length,0,faults.join('\n'));

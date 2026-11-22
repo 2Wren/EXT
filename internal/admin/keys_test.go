@@ -103,6 +103,19 @@ func TestKeysAPIContract(t *testing.T) {
 	if w.Code != 200 || len(ledger.Models(id)) != 0 {
 		t.Fatal("restriction not cleared", w.Code, ledger.Models(id))
 	}
+	w = request("PUT", "/api/keys", fmt.Sprintf(`{"id":%q,"weekly":123,"total":456,"week_reset":"0 18:00"}`, id))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"week_reset":"0 18:00"`) {
+		t.Fatal("reset update", w.Code, w.Body.String())
+	}
+	for _, bad := range []string{`"7 00:00"`, `"monday"`, `"1 8:00"`} {
+		if w = request("PUT", "/api/keys", fmt.Sprintf(`{"id":%q,"week_reset":%s}`, id, bad)); w.Code != 400 {
+			t.Fatal("invalid reset accepted", bad, w.Code)
+		}
+	}
+	w = request("GET", "/api/keys", "")
+	if !strings.Contains(w.Body.String(), `"week_reset":"0 18:00"`) || !strings.Contains(w.Body.String(), `"week_start":`) {
+		t.Fatal("reset not listed", w.Body.String())
+	}
 	if _, err = db.Exec(`INSERT INTO events(id,key_id,trace,request_id,session,provider,model,billed_model,auth_index,input,output,cached,cache_write,total,latency,ttft,failed,happened,body,cost)
  VALUES("a",?,"","","","p","m","m","",1,1,0,0,2,5,1,0,1000,"{}",7),("b",?,"","","","p","m","m","",1,1,0,0,2,5,1,1,2000,"{}",NULL),("c",?,"","","","p","m","m","",1,1,0,0,2,5,1,0,3000,"{}",9)`, id, id, id); err != nil {
 		t.Fatal(err)
@@ -233,5 +246,25 @@ func TestKeysAPIContract(t *testing.T) {
 	}
 	if ledger.Enabled(id) {
 		t.Fatal("CPA deleted key not blocked")
+	}
+
+	const first, second = "sk-alpha-fixture-key", "sk-zulu-fixture-key"
+	for _, order := range [][2]string{{second, first}, {first, second}} {
+		body = fmt.Sprintf(`[%q,%q,%q]`, order[0], order[1], order[0])
+		if w = request("POST", "/api/keys/sync", ""); w.Code != 200 {
+			t.Fatal("sync reordered keys", w.Code, w.Body.String())
+		}
+		w = request("GET", "/api/keys", "")
+		if err = json.Unmarshal(w.Body.Bytes(), &keys); err != nil || w.Code != 200 || len(keys) != 3 {
+			t.Fatal("list reordered keys", w.Code, err, w.Body.String())
+		}
+		for i, key := range order {
+			if keys[i]["id"] != cpa.KeyID(key) || keys[i]["cpa_present"] != true {
+				t.Fatalf("position %d does not match the CPA list: %v", i, keys)
+			}
+		}
+		if keys[2]["id"] != id || keys[2]["cpa_present"] != false {
+			t.Fatal("deleted key should follow current keys", keys)
+		}
 	}
 }

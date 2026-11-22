@@ -3,6 +3,8 @@ package billing
 import (
 	"database/sql"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,7 +16,7 @@ const maxLimit = 100_000 * USD
 var (
 	ErrDisabled = errors.New("key is not registered in CPA")
 	ErrModel    = errors.New("model is not allowed for this key")
-	ErrWeekly   = errors.New("weekly limit reached; it resets on Monday 00:00 (UTC+8)")
+	ErrWeekly   = errors.New("weekly limit reached")
 	ErrTotal    = errors.New("total limit reached")
 )
 
@@ -22,10 +24,44 @@ var Shanghai = time.FixedZone("Asia/Shanghai", 8*60*60)
 
 func Day(now time.Time) string { return now.In(Shanghai).Format("2006-01-02") }
 
-// Week is the day the current week began: Monday, Beijing time.
-func Week(now time.Time) string {
-	now = now.In(Shanghai)
-	return now.AddDate(0, 0, -((int(now.Weekday()) + 6) % 7)).Format("2006-01-02")
+// Reset is when a key's weekly window restarts, in Beijing time: a weekday
+// and a minute of the day.
+type Reset struct {
+	Weekday time.Weekday
+	Minute  int
+}
+
+// ParseReset reads "w HH:MM" where w is 0 (Sunday) through 6 (Saturday). The
+// empty string is the default reset: Monday 00:00.
+func ParseReset(text string) (Reset, error) {
+	if text == "" {
+		return Reset{Weekday: time.Monday}, nil
+	}
+	weekday, clock, _ := strings.Cut(text, " ")
+	hour, minute, _ := strings.Cut(clock, ":")
+	w, err1 := strconv.Atoi(weekday)
+	h, err2 := strconv.Atoi(hour)
+	m, err3 := strconv.Atoi(minute)
+	if err1 != nil || err2 != nil || err3 != nil || len(weekday) != 1 || len(hour) != 2 || len(minute) != 2 || w < 0 || w > 6 || h < 0 || h > 23 || m < 0 || m > 59 {
+		return Reset{}, fmt.Errorf("invalid weekly reset %q, want \"<weekday 0-6> <HH:MM>\"", text)
+	}
+	return Reset{Weekday: time.Weekday(w), Minute: h*60 + m}, nil
+}
+
+func (r Reset) String() string {
+	return fmt.Sprintf("%d %02d:%02d", int(r.Weekday), r.Minute/60, r.Minute%60)
+}
+
+// Start returns when the current weekly window began: the most recent reset
+// instant at or before now, in Beijing time.
+func (r Reset) Start(now time.Time) time.Time {
+	t := now.In(Shanghai)
+	midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, Shanghai)
+	start := midnight.AddDate(0, 0, -((int(t.Weekday()) - int(r.Weekday) + 7) % 7)).Add(time.Duration(r.Minute) * time.Minute)
+	if start.After(t) {
+		start = start.AddDate(0, 0, -7)
+	}
+	return start
 }
 
 type Key struct {
@@ -36,6 +72,15 @@ type Key struct {
 	Total  int64 `json:"total"`
 	// Models lists the model names this key may call; empty allows every model.
 	Models []string `json:"models"`
+	// WeekReset is the weekly reset schedule, "w HH:MM" where w is 0 (Sunday)
+	// through 6 (Saturday), in Beijing time; empty is the default Monday 00:00.
+	WeekReset string `json:"week_reset"`
+}
+
+// Reset returns the key's weekly reset schedule.
+func (k Key) Reset() Reset {
+	r, _ := ParseReset(k.WeekReset)
+	return r
 }
 
 type Price struct {
@@ -86,7 +131,7 @@ func New(db *sql.DB) (*Ledger, error) {
 	}
 	l := &Ledger{db: db, keys: map[string]*keyState{}, prices: map[[2]string]Price{}, now: time.Now,
 		manual: map[string]Price{}, reference: map[string]Price{}, catalog: map[string]CatalogPrice{}, rows: map[string]catalogRow{}}
-	rows, err := db.Query("SELECT k.id,k.name,k.weekly,k.total,k.models,coalesce(c.cpa_present,1) FROM keys k LEFT JOIN cpa_keys c ON c.id=k.id")
+	rows, err := db.Query("SELECT k.id,k.name,k.weekly,k.total,k.models,k.week_reset,coalesce(c.cpa_present,1) FROM keys k LEFT JOIN cpa_keys c ON c.id=k.id")
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +139,7 @@ func New(db *sql.DB) (*Ledger, error) {
 		var k Key
 		var present bool
 		var models string
-		if err = rows.Scan(&k.ID, &k.Name, &k.Weekly, &k.Total, &models, &present); err != nil {
+		if err = rows.Scan(&k.ID, &k.Name, &k.Weekly, &k.Total, &models, &k.WeekReset, &present); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -221,6 +266,18 @@ func wildcard(pattern, text string) bool {
 	return strings.HasSuffix(text, parts[len(parts)-1])
 }
 
+// WeeklySpend uses the indexed Beijing date for full days and checks event
+// timestamps on the reset date, where charges can fall on either side.
+func WeeklySpend(db *sql.DB, key string, start time.Time) (int64, error) {
+	day := Day(start)
+	var spent int64
+	err := db.QueryRow(`SELECT
+ (SELECT coalesce(sum(amount),0) FROM spend WHERE key_id=? AND day>?) +
+ (SELECT coalesce(sum(s.amount),0) FROM spend s JOIN events e ON e.id=s.event_id
+  WHERE s.key_id=? AND s.day=? AND e.happened>=?)`, key, day, key, day, start.UnixMilli()).Scan(&spent)
+	return spent, err
+}
+
 // Admit decides whether a key may start a request and returns the manual price
 // row recorded with the turn. Limits count the spend already recorded, so a
 // request in flight when a limit is reached still completes.
@@ -231,20 +288,23 @@ func (l *Ledger) Admit(key, protocol, model string) (int64, error) {
 	if k == nil || !k.present {
 		return 0, ErrDisabled
 	}
-	for _, limit := range []struct {
-		amount int64
-		since  string
-		err    error
-	}{{k.Total, "", ErrTotal}, {k.Weekly, Week(l.now()), ErrWeekly}} {
-		if limit.amount == 0 {
-			continue
-		}
+	if k.Total > 0 {
 		var spent int64
-		if err := l.db.QueryRow("SELECT coalesce(sum(amount),0) FROM spend WHERE key_id=? AND day>=?", key, limit.since).Scan(&spent); err != nil {
+		if err := l.db.QueryRow("SELECT coalesce(sum(s.amount),0) FROM spend s JOIN events e ON e.id=s.event_id WHERE s.key_id=? AND e.happened>=0", key).Scan(&spent); err != nil {
 			return 0, err
 		}
-		if spent >= limit.amount {
-			return 0, limit.err
+		if spent >= k.Total {
+			return 0, ErrTotal
+		}
+	}
+	if k.Weekly > 0 {
+		reset := k.Reset()
+		spent, err := WeeklySpend(l.db, key, reset.Start(l.now()))
+		if err != nil {
+			return 0, err
+		}
+		if spent >= k.Weekly {
+			return 0, fmt.Errorf("%w; it resets every %s %02d:%02d (UTC+8)", ErrWeekly, reset.Weekday, reset.Minute/60, reset.Minute%60)
 		}
 	}
 	return l.prices[[2]string{protocol, model}].ID, nil
@@ -256,6 +316,9 @@ func (l *Ledger) UpdateKey(key Key) error {
 	if len(key.ID) != 64 || len(key.Name) > 120 || key.Weekly < 0 || key.Total < 0 || key.Weekly > maxLimit || key.Total > maxLimit {
 		return errors.New("invalid key policy")
 	}
+	if _, err := ParseReset(key.WeekReset); err != nil {
+		return err
+	}
 	models, err := cleanModels(key.Models)
 	if err != nil {
 		return err
@@ -263,8 +326,8 @@ func (l *Ledger) UpdateKey(key Key) error {
 	key.Models = models
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if _, err = l.db.Exec("INSERT INTO keys(id,name,weekly,total,models) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET weekly=excluded.weekly,total=excluded.total,models=excluded.models",
-		key.ID, key.Name, key.Weekly, key.Total, strings.Join(models, "\n")); err != nil {
+	if _, err = l.db.Exec("INSERT INTO keys(id,name,weekly,total,models,week_reset) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET weekly=excluded.weekly,total=excluded.total,models=excluded.models,week_reset=excluded.week_reset",
+		key.ID, key.Name, key.Weekly, key.Total, strings.Join(models, "\n"), key.WeekReset); err != nil {
 		return err
 	}
 	present := true

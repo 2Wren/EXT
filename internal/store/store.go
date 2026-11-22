@@ -41,6 +41,8 @@ func Open(dir string) (*sql.DB, error) {
 		{"events", "approx", "INTEGER NOT NULL DEFAULT 0"},
 		{"keys", "models", "TEXT NOT NULL DEFAULT ''"},
 		{"keys", "weekly", "INTEGER NOT NULL DEFAULT 0"},
+		{"keys", "week_reset", "TEXT NOT NULL DEFAULT ''"},
+		{"cpa_keys", "position", "INTEGER"},
 	} {
 		exists, err := has(column.table, column.name)
 		if err == nil && !exists {

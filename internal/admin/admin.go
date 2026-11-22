@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"math"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -48,6 +50,7 @@ func (s Service) Handler(path string) http.Handler {
 	mux.HandleFunc("GET /api/models", s.models)
 	mux.HandleFunc("GET /api/sessions", s.sessions)
 	mux.HandleFunc("GET /api/turns/{id}", s.turn)
+	mux.HandleFunc("GET /api/turns/{id}/archive", s.turnArchive)
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.HandleFunc("GET /api/credentials", func(w http.ResponseWriter, r *http.Request) {
 		credentials, err := s.Collector.Credentials(r.Context())
@@ -159,26 +162,37 @@ func (s Service) series(w http.ResponseWriter, r *http.Request) {
 
 func (s Service) keys(w http.ResponseWriter, r *http.Request) {
 	rows, err := store.Query(s.DB, `SELECT k.*,coalesce(c.masked_key,'') masked_key,coalesce(c.cpa_present,0) cpa_present,
- (SELECT coalesce(sum(amount),0) FROM spend WHERE key_id=k.id) spent,
- (SELECT coalesce(sum(amount),0) FROM spend WHERE key_id=k.id AND day>=?) spent_week
- FROM keys k LEFT JOIN cpa_keys c ON c.id=k.id ORDER BY k.name,k.id`, billing.Week(time.Now()))
+ (SELECT coalesce(sum(amount),0) FROM spend WHERE key_id=k.id) spent
+ FROM keys k LEFT JOIN cpa_keys c ON c.id=k.id
+ ORDER BY cpa_present DESC,c.position NULLS LAST,k.name,k.id`)
 	if err != nil {
 		reply(w, 500, map[string]string{"error": "database query failed"})
 		return
 	}
+	now := time.Now()
 	for _, row := range rows {
 		row["models"] = billing.SplitModels(row["models"].(string))
 		row["cpa_present"] = row["cpa_present"].(int64) != 0
+		reset, _ := billing.ParseReset(row["week_reset"].(string))
+		start := reset.Start(now)
+		row["week_start"] = start.UnixMilli()
+		spent, err := billing.WeeklySpend(s.DB, row["id"].(string), start)
+		if err != nil {
+			reply(w, 500, map[string]string{"error": "database query failed"})
+			return
+		}
+		row["spent_week"] = spent
 	}
 	reply(w, 200, rows)
 }
 
 func (s Service) updateKey(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		ID     string   `json:"id"`
-		Weekly int64    `json:"weekly"`
-		Total  int64    `json:"total"`
-		Models []string `json:"models"`
+		ID        string   `json:"id"`
+		Weekly    int64    `json:"weekly"`
+		Total     int64    `json:"total"`
+		Models    []string `json:"models"`
+		WeekReset string   `json:"week_reset"`
 	}
 	if !decode(w, r, &input) {
 		return
@@ -200,7 +214,7 @@ func (s Service) updateKey(w http.ResponseWriter, r *http.Request) {
 		reply(w, 404, map[string]string{"error": "key not synchronized from CPA"})
 		return
 	}
-	if err := s.Ledger.UpdateKey(billing.Key{ID: input.ID, Weekly: input.Weekly, Total: input.Total, Models: input.Models}); err != nil {
+	if err := s.Ledger.UpdateKey(billing.Key{ID: input.ID, Weekly: input.Weekly, Total: input.Total, Models: input.Models, WeekReset: input.WeekReset}); err != nil {
 		reply(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
@@ -318,10 +332,35 @@ func (s Service) turn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body json.RawMessage
-	if data, err := s.Audit.Read(id); err == nil {
-		body = data
+	bodyStatus := "unavailable"
+	if data, err := s.Audit.Read(id); err == nil && json.Valid(data) {
+		body, bodyStatus = data, "available"
+	} else if errors.Is(err, audit.ErrPreviewTooLarge) {
+		bodyStatus = "too_large"
 	}
-	reply(w, 200, map[string]any{"turn": rows[0], "body": body})
+	reply(w, 200, map[string]any{"turn": rows[0], "body": body, "body_status": bodyStatus})
+}
+
+func (s Service) turnArchive(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	file, err := s.Audit.Open(id)
+	if errors.Is(err, os.ErrNotExist) {
+		reply(w, 404, map[string]string{"error": "archive not found"})
+		return
+	}
+	if err != nil {
+		reply(w, 500, map[string]string{"error": "archive unavailable"})
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		reply(w, 500, map[string]string{"error": "archive unavailable"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", "attachment; filename="+id+".json.gz")
+	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
 }
 
 // events lists requests newest first, one page at a time, within the period,

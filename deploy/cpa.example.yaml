@@ -1,7 +1,6 @@
 config-version: 8
 server:
   port: 8317
-  max-request-body-bytes: 1048576
   response-compression:
     enabled: false
 management:

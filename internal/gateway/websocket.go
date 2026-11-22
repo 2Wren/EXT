@@ -72,8 +72,6 @@ func (g *Gateway) websocket(w http.ResponseWriter, r *http.Request, key string) 
 		return
 	}
 	defer down.Close()
-	up.SetReadLimit(audit.ResponseCap)
-	down.SetReadLimit(audit.RequestCap)
 	done := make(chan struct{})
 	defer close(done)
 	client := readFrames(down, done)

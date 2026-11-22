@@ -18,9 +18,16 @@ import (
 	"cpa-ext/internal/billing"
 )
 
+// The gateway forwards bodies of any size, matching CPA, which does not limit
+// requests unless server.max-request-body-bytes is set. These sizes only bound
+// what the archive records per turn and the disk it reserves per slot.
 const RequestCap = 1 << 20
 const ResponseCap = 4 << 20
 const slots = 16
+
+const previewLimit = 32 << 20
+
+var ErrPreviewTooLarge = errors.New("archive exceeds inline preview limit")
 
 var validID = regexp.MustCompile("^[a-f0-9]{32}$")
 
@@ -185,11 +192,16 @@ func (a *Archive) write(id string, data any) error {
 	return nil
 }
 
-func (a *Archive) Read(id string) ([]byte, error) {
+// Open returns the archived gzip file without decompressing it.
+func (a *Archive) Open(id string) (*os.File, error) {
 	if !validID.MatchString(id) {
 		return nil, os.ErrNotExist
 	}
-	f, err := os.Open(filepath.Join(a.dir, id+".json.gz"))
+	return os.Open(filepath.Join(a.dir, id+".json.gz"))
+}
+
+func (a *Archive) Read(id string) ([]byte, error) {
+	f, err := a.Open(id)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +211,14 @@ func (a *Archive) Read(id string) ([]byte, error) {
 		return nil, err
 	}
 	defer z.Close()
-	return io.ReadAll(io.LimitReader(z, 32<<20))
+	data, err := io.ReadAll(io.LimitReader(z, previewLimit+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > previewLimit {
+		return nil, ErrPreviewTooLarge
+	}
+	return data, nil
 }
 
 func (a *Archive) Prune(now time.Time) error {
