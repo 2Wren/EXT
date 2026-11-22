@@ -45,43 +45,34 @@ sudo docker compose -p cpa-ext up -d --build
 
 ## 接入已有 CPA
 
-如果已经运行 CLIProxyAPI v8，可以单独启动 EXT。此方式适用于 Linux Docker Engine，要求宿主机能通过 HTTP 或 HTTPS 访问现有 CPA 的推理和 v8 管理接口。若 CPA 在 Docker 中，宿主机可通过它发布到回环地址的端口访问它。
-
-先在现有 CPA 配置中启用用量统计，将下面字段合并进已有的 `observability` 配置。EXT 读取用量队列时会取走记录。同一台 CPA 请只配置一个队列采集器。
-
-```yaml
-observability:
-  usage:
-    usage-statistics-enabled: true
-```
-
-克隆仓库后，在仓库根目录为 EXT 准备私有数据目录和连接参数。以下命令在首次运行时创建 `.env.attach`。
+已有 CLIProxyAPI v8 的 Linux Docker 用户可以用引导脚本接入 EXT。
 
 ```bash
 git clone https://github.com/2Wren/EXT.git
 cd EXT
-umask 077
-install -d -m 700 state/attach
-if [ ! -e .env.attach ]; then
-  cat > .env.attach <<EOF
-CPA_BASE_URL=http://127.0.0.1:8317
-CPA_MANAGEMENT_KEY='替换为现有 CPA 管理密钥'
-ADMIN_PASSWORD=$(openssl rand -hex 32)
-CPA_EXT_UID=$(id -u)
-CPA_EXT_GID=$(id -g)
-EOF
-fi
+bash deploy/attach.sh
 ```
 
-编辑 `.env.attach`，填入现有 CPA 的地址和登录 CPAMC 时使用的管理密钥。EXT 要求两个管理密码各至少 20 个字符，且彼此不同。若现有 CPA 通过 Docker 端口映射访问，并将请求识别为远程管理请求，可在 CPA 配置中启用 `management.allow-remote`，同时将管理入口保持在私有网络或回环地址。
+首次运行时输入现有 CPA 的地址和管理密钥。脚本会验证连接、生成独立的 EXT 管理密码，并启动 EXT。若 CPA 的用量统计未开启，脚本会询问是否通过管理 API 开启。同一台 CPA 请只运行一个队列采集器，因为读取队列会取走记录。
+
+用 `ADMIN_PASSWORD` 登录管理页 `http://127.0.0.1:8481/`。密码保存在 `.env.attach`。客户端继续沿用原有 CPA 客户端密钥，将 OpenAI 兼容基础地址设为 `http://127.0.0.1:8480/v1`。客户端请求经过 EXT 后，限额、模型限制和会话审计才会生效。
+
+<details>
+<summary>手动配置、端口和 CPAMC 嵌入</summary>
+
+再次运行 `bash deploy/attach.sh` 会沿用 `.env.attach`。也可直接运行以下命令部署或更新。
 
 ```bash
 sudo docker compose --env-file .env.attach -f compose.attach.yaml up -d --build
 ```
 
-用 `ADMIN_PASSWORD` 登录 `http://127.0.0.1:8481/`。客户端沿用现有 CPA 的客户端密钥，将 OpenAI 兼容基础地址设为 `http://127.0.0.1:8480/v1`。经 EXT 网关转发的请求会执行密钥限额、模型限制和会话审计。
+手动安装时，先创建私有数据目录 `state/attach`，并在 `.env.attach` 设置 `CPA_BASE_URL`、`CPA_MANAGEMENT_KEY`、`ADMIN_PASSWORD`、`CPA_EXT_UID` 和 `CPA_EXT_GID`。两个管理密码各至少 20 个字符，且应彼此不同。用量统计字段为 `observability.usage.usage-statistics-enabled`。
 
-端口冲突时，可在 `.env.attach` 设置 `CPA_EXT_GATEWAY_PORT` 和 `CPA_EXT_ADMIN_PORT`。如需嵌入 CPAMC，可设置 `CPA_EXT_PANEL_ADDR=127.0.0.1:8482` 并在现有 CPA 加载 EXT 原生插件。[插件和反向代理说明](deploy/README.md)
+端口冲突时，可在 `.env.attach` 设置 `CPA_EXT_GATEWAY_PORT` 和 `CPA_EXT_ADMIN_PORT`。如果 CPA 将回环端口映射的请求识别为远程管理请求，可以启用 `management.allow-remote`，并将 CPA 管理入口保持在私有网络或回环地址。
+
+如需嵌入 CPAMC，可设置 `CPA_EXT_PANEL_ADDR=127.0.0.1:8482` 并在现有 CPA 加载 EXT 原生插件。[插件和反向代理说明](deploy/README.md)
+
+</details>
 
 ## 计价与数据
 
